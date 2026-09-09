@@ -52,12 +52,15 @@ escape_sed_replacement() {
     printf '%s' "$1" | sed -e 's/[\&#]/\\&/g'
 }
 
+OSAC_UI_URL="${OSAC_UI_URL:-http://ui.osac.localhost:8080}"
+
 sed \
     -e "s#__OSAC_CONTROLLER_CLIENT_SECRET__#${CONTROLLER_SECRET}#" \
     -e "s#__OSAC_ADMIN_CLIENT_SECRET__#${ADMIN_SECRET}#" \
     -e "s#__OSAC_CSI_DRIVER_CLIENT_SECRET__#${CSI_DRIVER_SECRET}#" \
     -e "s#__OSAC_REALM_ADMIN_USERNAME__#$(escape_sed_replacement "$(json_escape_string "${REALM_ADMIN_USERNAME}")")#" \
     -e "s#__OSAC_REALM_ADMIN_PASSWORD__#$(escape_sed_replacement "$(json_escape_string "${REALM_ADMIN_PASSWORD}")")#" \
+    -e "s#__OSAC_UI_URL__#$(escape_sed_replacement "${OSAC_UI_URL}")#g" \
     "${RAW_REALM}" > "${RESOLVED_REALM}"
 
 echo "Realm secrets resolved -> ${RESOLVED_REALM}"

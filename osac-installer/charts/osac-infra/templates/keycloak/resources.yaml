@@ -400,6 +400,10 @@ spec:
             secretKeyRef:
               name: keycloak-admin-credentials
               key: admin-password
+        {{- if .Values.keycloak.uiUrl }}
+        - name: OSAC_UI_URL
+          value: {{ .Values.keycloak.uiUrl | quote }}
+        {{- end }}
         volumeMounts:
         - name: scripts
           mountPath: /scripts

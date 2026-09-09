@@ -35,6 +35,7 @@ keycloak:
   enabled: true
   realmOverwrite: true
   hostname: "keycloak.keycloak.svc.cluster.local"
+  uiUrl: ""
   adminUsername: admin
   adminPassword: admin
   defaultUserPassword: foobar
