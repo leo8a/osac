@@ -1,0 +1,38 @@
+# CRI-O default ulimit for nofile is 1024, which is too low for Envoy proxies
+# (AAP gateway, fulfillment ingress). Raise to 65536 on both pools.
+---
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  name: 99-worker-raise-nofile
+spec:
+  config:
+    ignition:
+      version: 3.4.0
+    storage:
+      files:
+      - path: /etc/crio/crio.conf.d/01-nofile.conf
+        mode: 0644
+        overwrite: true
+        contents:
+          source: "data:text/plain;charset=utf-8,%5Bcrio.runtime%5D%0Adefault_ulimits%20%3D%20%5B%0A%20%20%22nofile%3D65536%3A65536%22%0A%5D%0A"
+---
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: master
+  name: 99-master-raise-nofile
+spec:
+  config:
+    ignition:
+      version: 3.4.0
+    storage:
+      files:
+      - path: /etc/crio/crio.conf.d/01-nofile.conf
+        mode: 0644
+        overwrite: true
+        contents:
+          source: "data:text/plain;charset=utf-8,%5Bcrio.runtime%5D%0Adefault_ulimits%20%3D%20%5B%0A%20%20%22nofile%3D65536%3A65536%22%0A%5D%0A"

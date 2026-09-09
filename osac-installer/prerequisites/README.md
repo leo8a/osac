@@ -21,6 +21,7 @@ prerequisites/
 ├── ca-issuer.yaml
 ├── trust-manager.yaml
 ├── aap-installation.yaml
+├── raise-nofile-machineconfig.yaml
 ├── cnv/
 ├── lvms/
 ├── mce/
@@ -51,6 +52,19 @@ prerequisites/
 ## Installation
 
 Install components in order — some depend on earlier ones.
+
+### Step 0: Raise CRI-O nofile limit
+
+CRI-O defaults to `nofile=1024`, which is too low for Envoy proxies (AAP gateway,
+fulfillment ingress). Apply before deploying OSAC. Triggers a rolling reboot of all nodes.
+
+```bash
+oc apply -f prerequisites/raise-nofile-machineconfig.yaml
+
+# Wait for both MCPs to finish rolling out
+oc wait mcp worker --for=condition=Updated --timeout=600s
+oc wait mcp master --for=condition=Updated --timeout=600s
+```
 
 ### Step 1: Cert Manager
 
