@@ -20,6 +20,17 @@ data:
         deviceClasses:
           - name: vg1
             default: true
+            {{- if .Values.lvms.deviceSelector }}
+            deviceSelector:
+              {{- with .Values.lvms.deviceSelector.paths }}
+              paths:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with .Values.lvms.deviceSelector.optionalPaths }}
+              optionalPaths:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+            {{- end }}
             thinPoolConfig:
               name: thin-pool-1
               sizePercent: 90

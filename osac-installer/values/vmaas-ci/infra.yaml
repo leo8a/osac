@@ -9,6 +9,16 @@ aapOperator:
   enabled: true
 lvms:
   enabled: true
+  deviceSelector:
+    optionalPaths:
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcd40c
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcd551
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcd38a
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcdae7
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcda65
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcda24
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcd5d3
+      - /dev/disk/by-id/nvme-eui.01000000000000008ce38ee302fcd592
 metallb:
   enabled: true
 cnv:
