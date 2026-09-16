@@ -427,6 +427,17 @@
           DELETE call order: {{ _delete_paths }}
         success_msg: "Correct order: tenant deleted before local provider"
 
+    - name: Assert tenant deletion uses force_remove
+      vars:
+        _tenant_del_paths: "{{ _call_log | selectattr('method', 'equalto', 'DELETE') | map(attribute='path') | select('search', 'tenants/') | list }}"
+      ansible.builtin.assert:
+        that:
+          - _tenant_del_paths | select('search', 'force_remove') | list | length > 0
+        fail_msg: >-
+          Tenant DELETE must include force_remove query parameter.
+          Tenant DELETE paths: {{ _tenant_del_paths }}
+        success_msg: "Correct: tenant deletion uses force_remove"
+
 # ── Cleanup: Best-effort removal of any remaining resources ──
 - name: "Storage Provider Teardown - Final cleanup"
   hosts: localhost
