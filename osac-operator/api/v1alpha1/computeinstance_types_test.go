@@ -184,7 +184,6 @@ var _ = Describe("ComputeInstance", func() {
 			spec := v1alpha1.ComputeInstanceSpec{
 				NetworkAttachments: []v1alpha1.ComputeNetworkAttachment{
 					{SubnetRef: "subnet-A", SecurityGroupRefs: []string{"sg-1"}},
-					{SubnetRef: "subnet-B", SecurityGroupRefs: []string{"sg-2"}},
 				},
 			}
 
@@ -223,7 +222,7 @@ var _ = Describe("ComputeInstance", func() {
 			Expect(spec.NetworkAttachments[0].SecurityGroupRefs).To(Equal([]string{"sg-1", "sg-2"}))
 		})
 
-		It("should support multiple network attachments", func() {
+		It("should preserve the repeated network attachment field", func() {
 			spec := v1alpha1.ComputeInstanceSpec{
 				TemplateID: "test-template",
 				Image: v1alpha1.ImageSpec{
@@ -236,15 +235,11 @@ var _ = Describe("ComputeInstance", func() {
 				RunStrategy: v1alpha1.RunStrategyAlways,
 				NetworkAttachments: []v1alpha1.ComputeNetworkAttachment{
 					{SubnetRef: "subnet-A", SecurityGroupRefs: []string{"web-sg"}},
-					{SubnetRef: "subnet-B", SecurityGroupRefs: []string{"db-sg"}},
-					{SubnetRef: "subnet-C", SecurityGroupRefs: []string{"mon-sg"}},
 				},
 			}
 
-			Expect(spec.NetworkAttachments).To(HaveLen(3))
+			Expect(spec.NetworkAttachments).To(HaveLen(1))
 			Expect(spec.NetworkAttachments[0].SubnetRef).To(Equal("subnet-A"))
-			Expect(spec.NetworkAttachments[1].SubnetRef).To(Equal("subnet-B"))
-			Expect(spec.NetworkAttachments[2].SubnetRef).To(Equal("subnet-C"))
 		})
 
 		It("should support network attachment without security groups", func() {
@@ -299,7 +294,7 @@ var _ = Describe("ComputeInstance", func() {
 			// 1. Field-level XValidation: subnetRef has "self == oldSelf" rule
 			// 2. Array-level XValidation: networkAttachments has "size(self) == size(oldSelf)" rule
 			// 3. List type markers: +listType=map and +listMapKey=subnetRef make array correlatable
-			// 4. MaxItems: +kubebuilder:validation:MaxItems=8 reduces CEL cost
+			// 4. MaxItems: +kubebuilder:validation:MaxItems=1 enforces single-NIC support
 			//
 			// When updating a ComputeInstance via kubectl/API:
 			// - Changing subnetRef from "subnet-A" to "subnet-B" → REJECTED (field validation)
@@ -314,11 +309,5 @@ var _ = Describe("ComputeInstance", func() {
 			Expect(spec.NetworkAttachments[0].SubnetRef).To(Equal("subnet-A"))
 		})
 
-		It("documents max network attachments limit", func() {
-			// The CRD enforces maxItems: 8 to keep CEL validation cost within budget.
-			// Attempting to create a ComputeInstance with >8 network attachments
-			// would be rejected by the API server.
-			Expect(8).To(BeNumerically(">", 0))
-		})
 	})
 })

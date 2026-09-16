@@ -42,12 +42,6 @@ message BareMetalInstance {
 
 // The spec contains the details of a bare metal instance as desired by the user.
 message BareMetalInstanceSpec {
-  option (buf.validate.message).cel = {
-    id: "baremetal_instance_primary_attachment"
-    message: "when multiple network attachments are specified, exactly one must have primary set to true"
-    expression: "this.network_attachments.size() <= 1 || this.network_attachments.filter(a, a.primary == true).size() == 1"
-  };
-
   // Reference to the BareMetalInstanceCatalogItem. Either `catalog_item` or `template` is required on create.
   //
   // Mutually exclusive with `template`.
@@ -114,10 +108,10 @@ message BareMetalInstanceSpec {
   // OS base image configuration.
   optional BareMetalInstanceImage image = 7 [(google.api.field_behavior) = IMMUTABLE];
 
-  // Network attachments for the bare metal instance. One entry per physical NIC.
-  // The list structure is immutable after creation (entries cannot be added or removed),
-  // but security_groups within each entry can be updated.
-  repeated BareMetalNetworkAttachment network_attachments = 8;
+  // Optional network attachment. The field remains repeated for wire compatibility,
+  // but at most one attachment is accepted. Security groups within the attachment
+  // can be updated.
+  repeated BareMetalNetworkAttachment network_attachments = 8 [(buf.validate.field).repeated = {max_items: 1}];
 
   // When true, the system auto-selects an ExternalIPPool and creates an ExternalIP
   // with an ExternalIPAttachment for this instance atomically during creation.

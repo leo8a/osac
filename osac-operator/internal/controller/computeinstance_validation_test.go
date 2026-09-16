@@ -184,7 +184,6 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 			instance := createValidInstance("test-remove-attachment")
 			instance.Spec.NetworkAttachments = []osacv1alpha1.ComputeNetworkAttachment{
 				{SubnetRef: "subnet-a"},
-				{SubnetRef: "subnet-b"},
 			}
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
@@ -193,7 +192,7 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
 
 			// Try to remove a networkAttachment
-			instance.Spec.NetworkAttachments = instance.Spec.NetworkAttachments[:1]
+			instance.Spec.NetworkAttachments = instance.Spec.NetworkAttachments[:0]
 			err := k8sClient.Update(ctx, instance)
 			Expect(err).To(HaveOccurred())
 			Expect(apierrors.IsInvalid(err)).To(BeTrue())
@@ -625,18 +624,11 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 	})
 
 	Describe("MaxItems validation", func() {
-		It("should reject creating ComputeInstance with more than 8 networkAttachments", func() {
+		It("should reject creating ComputeInstance with more than one networkAttachment", func() {
 			instance := createValidInstance("test-max-attachments")
 			instance.Spec.NetworkAttachments = []osacv1alpha1.ComputeNetworkAttachment{
 				{SubnetRef: "subnet-1"},
 				{SubnetRef: "subnet-2"},
-				{SubnetRef: "subnet-3"},
-				{SubnetRef: "subnet-4"},
-				{SubnetRef: "subnet-5"},
-				{SubnetRef: "subnet-6"},
-				{SubnetRef: "subnet-7"},
-				{SubnetRef: "subnet-8"},
-				{SubnetRef: "subnet-9"}, // 9th entry exceeds maxItems:8
 			}
 
 			err := k8sClient.Create(ctx, instance)
@@ -645,17 +637,10 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 			Expect(err.Error()).To(ContainSubstring("Too many"))
 		})
 
-		It("should allow creating ComputeInstance with exactly 8 networkAttachments", func() {
-			instance := createValidInstance("test-exactly-8-attachments")
+		It("should allow creating ComputeInstance with exactly one networkAttachment", func() {
+			instance := createValidInstance("test-exactly-one-attachment")
 			instance.Spec.NetworkAttachments = []osacv1alpha1.ComputeNetworkAttachment{
 				{SubnetRef: "subnet-1"},
-				{SubnetRef: "subnet-2"},
-				{SubnetRef: "subnet-3"},
-				{SubnetRef: "subnet-4"},
-				{SubnetRef: "subnet-5"},
-				{SubnetRef: "subnet-6"},
-				{SubnetRef: "subnet-7"},
-				{SubnetRef: "subnet-8"},
 			}
 
 			Expect(k8sClient.Create(ctx, instance)).To(Succeed())

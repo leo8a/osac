@@ -137,8 +137,9 @@ message ComputeInstanceSpec {
   reserved 12, 13;
   reserved "subnet", "security_groups";
 
-  // Network attachments: one entry per NIC.
-  repeated ComputeNetworkAttachment network_attachments = 14;
+  // Optional network attachment. The field remains repeated for wire compatibility,
+  // but at most one attachment is accepted.
+  repeated ComputeNetworkAttachment network_attachments = 14 [(buf.validate.field).repeated = {max_items: 1}];
 
   // Reference to a compute instance catalog item. Mutually exclusive with template during the migration period.
   // When set, the server fetches the catalog item and applies its field definitions.

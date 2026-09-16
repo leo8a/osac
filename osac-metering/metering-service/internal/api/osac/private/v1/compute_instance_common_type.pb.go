@@ -101,7 +101,7 @@ func (ComputeInstanceRunStrategy) EnumDescriptor() ([]byte, []int) {
 	return file_osac_private_v1_compute_instance_common_type_proto_rawDescGZIP(), []int{0}
 }
 
-// Groups one subnet with security groups for that network attachment (multi-NIC VMs).
+// Groups one subnet with security groups for the optional VM network attachment.
 type ComputeNetworkAttachment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Reference to the Subnet for this NIC; must be in READY state (same tenant and region rules as ComputeInstance).

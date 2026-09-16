@@ -88,31 +88,33 @@ var _ = Describe("applyNetworkingFlags", func() {
 	It("should populate attachments when network-attachment flags are set", func() {
 		c := &runnerContext{}
 		c.args.networkAttachments = []string{
-			"subnet=n1,interface=data-0,primary",
-			"subnet=n2,interface=data-1,security-groups=g1",
+			"subnet=n1,interface=data-0,primary,security-groups=g1",
 		}
 		spec := publicv1.BareMetalInstanceSpec_builder{}
 		err := c.applyNetworkingFlags(&spec)
 		Expect(err).NotTo(HaveOccurred())
 
 		iface0 := "data-0"
-		iface1 := "data-1"
 		isPrimary := true
 		want := publicv1.BareMetalInstanceSpec_builder{
 			NetworkAttachments: []*publicv1.BareMetalNetworkAttachment{
 				publicv1.BareMetalNetworkAttachment_builder{
-					Subnet:    &publicv1.SubnetLocalReference{Id: "n1"},
-					Interface: &iface0,
-					Primary:   &isPrimary,
-				}.Build(),
-				publicv1.BareMetalNetworkAttachment_builder{
-					Subnet:         &publicv1.SubnetLocalReference{Id: "n2"},
-					Interface:      &iface1,
+					Subnet:         &publicv1.SubnetLocalReference{Id: "n1"},
+					Interface:      &iface0,
+					Primary:        &isPrimary,
 					SecurityGroups: []*publicv1.SecurityGroupLocalReference{{Id: "g1"}},
 				}.Build(),
 			},
 		}.Build()
 		Expect(proto.Equal(spec.Build(), want)).To(BeTrue(), "spec should equal expected spec")
+	})
+
+	It("should reject multiple network-attachment flags", func() {
+		c := &runnerContext{}
+		c.args.networkAttachments = []string{"subnet=n1", "subnet=n2"}
+		spec := publicv1.BareMetalInstanceSpec_builder{}
+		err := c.applyNetworkingFlags(&spec)
+		Expect(err).To(MatchError("--network-attachment may be specified at most once"))
 	})
 
 	It("should leave attachments nil when no network flags are set", func() {

@@ -97,7 +97,7 @@ func (x ComputeInstanceRunStrategy) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Groups one subnet with security groups for that network attachment (multi-NIC VMs).
+// Groups one subnet with security groups for the optional VM network attachment.
 type ComputeNetworkAttachment struct {
 	state protoimpl.MessageState `protogen:"hybrid.v1"`
 	// Reference to the Subnet for this NIC; must be in READY state (same tenant and region rules as ComputeInstance).

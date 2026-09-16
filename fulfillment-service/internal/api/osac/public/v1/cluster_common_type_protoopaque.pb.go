@@ -156,8 +156,8 @@ func (b0 ClusterNetwork_builder) Build() *ClusterNetwork {
 
 // Defines the network attachment for a cluster, connecting it to a tenant subnet with optional security groups.
 //
-// Unlike compute instances, which support multiple network attachments (one per virtual NIC), a cluster has a single
-// network attachment shared by all node sets. The fabric interface for each node set is resolved automatically by the
+// Compute instances and bare-metal instances support at most one network attachment. A cluster has a single network
+// attachment shared by all node sets. The fabric interface for each node set is resolved automatically by the
 // system from the node set's host type.
 type ClusterNetworkAttachment struct {
 	state                     protoimpl.MessageState          `protogen:"opaque.v1"`

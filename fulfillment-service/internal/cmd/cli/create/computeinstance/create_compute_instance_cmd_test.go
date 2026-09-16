@@ -67,21 +67,27 @@ var _ = Describe("parseNetworkAttachmentFlag", func() {
 var _ = Describe("buildSpec", func() {
 	It("should populate attachments when network-attachment flags are set", func() {
 		c := &runnerContext{}
-		c.args.networkAttachments = []string{"n1", "subnet=n2,security-groups=g1"}
+		c.args.networkAttachments = []string{"subnet=n1,security-groups=g1"}
 		spec, err := c.buildSpec("tmpl", nil)
 		Expect(err).NotTo(HaveOccurred())
 
 		want := publicv1.ComputeInstanceSpec_builder{
 			Template: publicv1.ComputeInstanceTemplateReference_builder{Id: "tmpl"}.Build(),
 			NetworkAttachments: []*publicv1.ComputeNetworkAttachment{
-				publicv1.ComputeNetworkAttachment_builder{Subnet: publicv1.SubnetLocalReference_builder{Id: "n1"}.Build()}.Build(),
 				publicv1.ComputeNetworkAttachment_builder{
-					Subnet:         publicv1.SubnetLocalReference_builder{Id: "n2"}.Build(),
+					Subnet:         publicv1.SubnetLocalReference_builder{Id: "n1"}.Build(),
 					SecurityGroups: []*publicv1.SecurityGroupLocalReference{publicv1.SecurityGroupLocalReference_builder{Id: "g1"}.Build()},
 				}.Build(),
 			},
 		}.Build()
 		Expect(proto.Equal(spec, want)).To(BeTrue(), "spec should equal expected spec")
+	})
+
+	It("should reject multiple network-attachment flags", func() {
+		c := &runnerContext{}
+		c.args.networkAttachments = []string{"n1", "n2"}
+		_, err := c.buildSpec("tmpl", nil)
+		Expect(err).To(MatchError("--network-attachment may be specified at most once"))
 	})
 
 	It("should set disk_image when disk-image flag is provided", func() {
@@ -107,16 +113,15 @@ var _ = Describe("buildSpec", func() {
 var _ = Describe("buildSpecFromCatalogItem", func() {
 	It("should populate attachments when network-attachment flags are set", func() {
 		c := &runnerContext{}
-		c.args.networkAttachments = []string{"n1", "subnet=n2,security-groups=g1"}
+		c.args.networkAttachments = []string{"subnet=n1,security-groups=g1"}
 		spec, err := c.buildSpecFromCatalogItem("cat-001")
 		Expect(err).NotTo(HaveOccurred())
 
 		want := publicv1.ComputeInstanceSpec_builder{
 			CatalogItem: publicv1.ComputeInstanceCatalogItemReference_builder{Id: "cat-001"}.Build(),
 			NetworkAttachments: []*publicv1.ComputeNetworkAttachment{
-				publicv1.ComputeNetworkAttachment_builder{Subnet: publicv1.SubnetLocalReference_builder{Id: "n1"}.Build()}.Build(),
 				publicv1.ComputeNetworkAttachment_builder{
-					Subnet:         publicv1.SubnetLocalReference_builder{Id: "n2"}.Build(),
+					Subnet:         publicv1.SubnetLocalReference_builder{Id: "n1"}.Build(),
 					SecurityGroups: []*publicv1.SecurityGroupLocalReference{publicv1.SecurityGroupLocalReference_builder{Id: "g1"}.Build()},
 				}.Build(),
 			},

@@ -176,28 +176,27 @@ type ComputeInstanceSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="sshKey is immutable"
 	SSHKey string `json:"sshKey,omitempty"`
 
-	// NetworkAttachments defines multiple NICs when more than one subnet (and optional security groups per NIC) is required.
-	// The first entry is the primary subnet for VM placement (subnet-namespace annotation).
-	// Subnet references (per ComputeNetworkAttachment) are immutable but security groups can be changed.
+	// NetworkAttachments holds the optional VM network attachment. The field remains
+	// a slice for API compatibility, but at most one entry is supported.
+	// The sole entry is the primary subnet for VM placement (subnet-namespace annotation).
+	// Subnet references are immutable but security groups can be changed.
 	//
 	// Why immutability is required:
 	// Currently, ComputeInstances are created with a single NIC. The VM instance must be created in the namespace
 	// of the subnet it uses (the subnet-namespace annotation determines VM placement). This architectural constraint
 	// means that changing the subnet would require recreating the VM in a different namespace, which is not supported.
-	// Similarly, the array size cannot change because adding/removing NICs would require changing the primary subnet
+	// The array size cannot change because adding/removing the attachment would require changing the primary subnet
 	// or the VM's namespace, both of which are immutable after VM creation.
 	//
 	// Immutability enforcement:
 	// - The +listType=map with +listMapKey=subnetRef markers correlate entries by subnetRef for updates
-	// - The size check below prevents adding or removing entries
+	// - The size check below prevents adding or removing the entry
 	// - The per-item subnetRef validation (self == oldSelf) prevents changing keys of existing entries
 	// Combined, these ensure only securityGroupRefs can be modified.
 	//
-	// MaxItems is required for CEL cost budget calculation: ComputeNetworkAttachment.SubnetRef has a CEL validation
-	// rule (self == oldSelf for immutability). Without maxItems, Kubernetes cannot bound the cost of iterating
-	// over array items to validate this rule, causing CRD installation to fail with "estimated rule cost exceeds budget".
+	// MaxItems is required for CEL cost budget calculation and enforces the single-NIC contract.
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:MaxItems=1
 	// +kubebuilder:validation:XValidation:rule="size(oldSelf) == 0 || (size(self) == size(oldSelf) && self.all(na, oldSelf.exists(old, old.subnetRef == na.subnetRef)))",message="cannot change or add/remove network attachments after initial assignment"
 	// +listType=map
 	// +listMapKey=subnetRef

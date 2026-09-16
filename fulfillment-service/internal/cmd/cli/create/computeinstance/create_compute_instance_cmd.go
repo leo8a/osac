@@ -794,6 +794,9 @@ func (c *runnerContext) applyNetworkingFlags(spec *publicv1.ComputeInstanceSpec_
 	if len(c.args.networkAttachments) == 0 {
 		return nil
 	}
+	if len(c.args.networkAttachments) > 1 {
+		return fmt.Errorf("--network-attachment may be specified at most once")
+	}
 
 	attachments := make([]*publicv1.ComputeNetworkAttachment, 0, len(c.args.networkAttachments))
 	for _, raw := range c.args.networkAttachments {
@@ -1112,8 +1115,8 @@ ignition configuration.
 const networkAttachmentFlagHelp = `
 _SPEC_ - Per-NIC network attachment. The value can be a plain subnet ID, or a
 comma-separated specification in the format
-{{ bt }}subnet=ID[,security-groups=ID,ID...]{{ bt }}. Can be
-specified multiple times to attach multiple NICs.
+{{ bt }}subnet=ID[,security-groups=ID,ID...]{{ bt }}. May be specified at most
+once.
 `
 
 const externalIPAttachmentFlagHelp = `

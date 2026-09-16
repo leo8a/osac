@@ -269,8 +269,7 @@ comma-separated specification in the format
 {{ bt }}subnet=ID[,interface=NAME][,primary][,security-groups=ID,ID...]{{ bt }}.
 The {{ bt }}interface{{ bt }} field maps a physical NIC from the bare metal
 instance type. The {{ bt }}primary{{ bt }} keyword (bare, no value) designates
-the default gateway for multi-NIC instances. Can be specified multiple times
-to attach multiple NICs.
+the default gateway. May be specified at most once.
 `
 
 const setFlagHelp = `
@@ -283,6 +282,9 @@ multiple times.
 func (c *runnerContext) applyNetworkingFlags(spec *publicv1.BareMetalInstanceSpec_builder) error {
 	if len(c.args.networkAttachments) == 0 {
 		return nil
+	}
+	if len(c.args.networkAttachments) > 1 {
+		return fmt.Errorf("--network-attachment may be specified at most once")
 	}
 	attachments := make([]*publicv1.BareMetalNetworkAttachment, 0, len(c.args.networkAttachments))
 	for _, raw := range c.args.networkAttachments {

@@ -37,12 +37,18 @@ var _ = Describe("ValidateNetworkAttachments", func() {
 			[]*privatev1.ComputeNetworkAttachment{},
 			false,
 		),
-		Entry("valid attachments with subnets",
+		Entry("valid attachment with subnet",
+			[]*privatev1.ComputeNetworkAttachment{
+				privatev1.ComputeNetworkAttachment_builder{Subnet: privatev1.SubnetLocalReference_builder{Id: "subnet-a"}.Build()}.Build(),
+			},
+			false,
+		),
+		Entry("invalid multiple attachments",
 			[]*privatev1.ComputeNetworkAttachment{
 				privatev1.ComputeNetworkAttachment_builder{Subnet: privatev1.SubnetLocalReference_builder{Id: "subnet-a"}.Build()}.Build(),
 				privatev1.ComputeNetworkAttachment_builder{Subnet: privatev1.SubnetLocalReference_builder{Id: "subnet-b"}.Build()}.Build(),
 			},
-			false,
+			true,
 		),
 		Entry("valid attachment with subnet and security groups",
 			[]*privatev1.ComputeNetworkAttachment{

@@ -22,7 +22,7 @@ import "osac/private/v1/subnet_type.proto";
 
 option (cleanapi.file).package = "osac.public.v1";
 
-// Network attachment for a bare metal instance NIC.
+// Optional network attachment for a bare metal instance.
 // Groups a subnet with security groups and a physical interface binding.
 message BareMetalNetworkAttachment {
   // Reference to the Subnet. Must reference a Subnet in READY state.
@@ -36,8 +36,8 @@ message BareMetalNetworkAttachment {
   // When omitted on a single-attachment instance, the system selects the first fabric-role interface.
   optional string interface = 3 [(google.api.field_behavior) = IMMUTABLE];
 
-  // Designates this attachment as the default gateway for multi-NIC instances.
-  // When omitted on a single-attachment instance, that attachment is implicitly primary.
+  // Designates this attachment as the default gateway. With at most one attachment,
+  // the sole attachment is implicitly primary when this field is omitted.
   optional bool primary = 4 [(google.api.field_behavior) = IMMUTABLE];
 }
 

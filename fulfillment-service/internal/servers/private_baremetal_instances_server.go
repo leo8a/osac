@@ -887,36 +887,9 @@ func (s *PrivateBareMetalInstancesServer) validateNetworkAttachments(ctx context
 	if len(attachments) == 0 {
 		return nil
 	}
-
-	// Structural validation: duplicates and multi-NIC interface requirement.
-	seenInterfaces := make(map[string]bool)
-	for i, a := range attachments {
-		iface := a.GetInterface()
-		if len(attachments) > 1 && iface == "" {
-			return grpcstatus.Errorf(grpccodes.InvalidArgument,
-				"network_attachments[%d]: interface is required when multiple attachments are specified", i)
-		}
-		if iface != "" {
-			if seenInterfaces[iface] {
-				return grpcstatus.Errorf(grpccodes.InvalidArgument,
-					"network_attachments[%d]: duplicate interface '%s'", i, iface)
-			}
-			seenInterfaces[iface] = true
-		}
-	}
-
-	// Primary validation (defense-in-depth with CEL).
 	if len(attachments) > 1 {
-		primaryCount := 0
-		for _, a := range attachments {
-			if a.GetPrimary() {
-				primaryCount++
-			}
-		}
-		if primaryCount != 1 {
-			return grpcstatus.Errorf(grpccodes.InvalidArgument,
-				"when multiple network attachments are specified, exactly one must have primary set to true")
-		}
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"network_attachments: at most one network attachment is supported")
 	}
 
 	// Interface-against-HostType validation (only when template has host_type).

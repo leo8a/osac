@@ -19,7 +19,7 @@ import "buf/validate/validate.proto";
 import "osac/public/v1/security_group_type.proto";
 import "osac/public/v1/subnet_type.proto";
 
-// Groups one subnet with security groups for that network attachment (multi-NIC VMs).
+// Groups one subnet with security groups for the optional VM network attachment.
 message ComputeNetworkAttachment {
   // Reference to the Subnet for this NIC; must be in READY state (same tenant and region rules as ComputeInstance).
   SubnetLocalReference subnet = 1;

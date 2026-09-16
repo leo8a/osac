@@ -88,7 +88,7 @@ func (BareMetalInstanceRunStrategy) EnumDescriptor() ([]byte, []int) {
 	return file_osac_private_v1_baremetal_instance_common_type_proto_rawDescGZIP(), []int{0}
 }
 
-// Network attachment for a bare metal instance NIC.
+// Optional network attachment for a bare metal instance.
 // Groups a subnet with security groups and a physical interface binding.
 type BareMetalNetworkAttachment struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -100,8 +100,8 @@ type BareMetalNetworkAttachment struct {
 	// Physical interface name from the HostType's NetworkInterface list.
 	// When omitted on a single-attachment instance, the system selects the first fabric-role interface.
 	Interface *string `protobuf:"bytes,3,opt,name=interface,proto3,oneof" json:"interface,omitempty"`
-	// Designates this attachment as the default gateway for multi-NIC instances.
-	// When omitted on a single-attachment instance, that attachment is implicitly primary.
+	// Designates this attachment as the default gateway. With at most one attachment,
+	// the sole attachment is implicitly primary when this field is omitted.
 	Primary       *bool `protobuf:"varint,4,opt,name=primary,proto3,oneof" json:"primary,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
