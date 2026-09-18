@@ -28,7 +28,7 @@
     "react-dom": "^19.2.4",
     "react-i18next": "^15.0.0",
     "react-router-dom": "^7.0.0",
-    "react-svg": "^16.2.0",
+    "react-svg": "^19.0.0",
     "victory": "^37.3.6"
   },
   "devDependencies": {
