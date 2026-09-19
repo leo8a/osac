@@ -23,7 +23,7 @@ type NodeServer struct {
 	vendorSockets map[string]string
 
 	mu             sync.Mutex
-	volumeBackends map[string]string // volumeID -> backend name
+	volumeBackends map[string]string // volumeID -> provider
 }
 
 // NewNodeServer creates a new CSI node server.

@@ -32,7 +32,7 @@ type ControllerServer struct {
 	csi.UnimplementedControllerServer
 	volumes  fulfillment.VolumeClient
 	proxyMgr *proxy.Manager
-	// vendorControllers maps an "osac.backend" name to the gRPC endpoint of that
+	// vendorControllers maps an "osac.backend" provider to the gRPC endpoint of that
 	// vendor's CSI controller, used to proxy publish/unpublish operations.
 	vendorControllers map[string]string
 	clusterID         string
@@ -42,7 +42,7 @@ type ControllerServer struct {
 }
 
 // NewControllerServer creates a new CSI controller server. vendorControllers maps
-// an "osac.backend" name to the gRPC endpoint of that vendor's CSI controller.
+// an "osac.backend" provider to the gRPC endpoint of that vendor's CSI controller.
 func NewControllerServer(vc fulfillment.VolumeClient, proxyMgr *proxy.Manager, vendorControllers map[string]string, clusterID string) *ControllerServer {
 	return &ControllerServer{
 		volumes:             vc,

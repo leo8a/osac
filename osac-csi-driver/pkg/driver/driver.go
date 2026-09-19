@@ -31,9 +31,9 @@ type Driver struct {
 	node       csi.NodeServer
 }
 
-// NewDriver creates a new OSAC CSI driver instance. vendorSockets maps a backend
-// name to the vendor node CSI socket (used by the node plugin), and
-// vendorControllers maps a backend name to the vendor CSI controller endpoint
+// NewDriver creates a new OSAC CSI driver instance. vendorSockets maps a
+// provider to the vendor node CSI socket (used by the node plugin), and
+// vendorControllers maps a provider to the vendor CSI controller endpoint
 // (used by the controller plugin for publish/unpublish).
 func NewDriver(name, version, endpoint, nodeID, clusterID string, vc fulfillment.VolumeClient, vendorSockets, vendorControllers map[string]string) (*Driver, error) {
 	if name == "" {
