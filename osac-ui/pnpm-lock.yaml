@@ -28,7 +28,7 @@ importers:
         version: 7.1.1(eslint@9.39.5(jiti@2.7.0))
       globals:
         specifier: ^17.4.0
-        version: 17.5.0
+        version: 17.12.0
       nodemon:
         specifier: ^3.1.14
         version: 3.1.14
@@ -158,7 +158,7 @@ importers:
     dependencies:
       '@bufbuild/protobuf':
         specifier: 2.12.0
-        version: 2.15.0
+        version: 2.12.0
     devDependencies:
       '@bufbuild/buf':
         specifier: 1.73.0
@@ -395,6 +395,9 @@ packages:
     resolution: {integrity: sha512-W3whb4P1y3Hs9bqwCu9++W1v1ofHZ3dBUCe6JSZq0Ff5OK5UKKZuMN4iunPbgdyXY4+4ujEYf2ESrN/6MbcFSQ==}
     engines: {node: '>=12'}
     hasBin: true
+
+  '@bufbuild/protobuf@2.12.0':
+    resolution: {integrity: sha512-B/XlCaFIP8LOwzo+bz5uFzATYokcwCKQcghqnlfwSmM5eX/qTkvDBnDPs+gXtX/RyjxJ4DRikECcPJbyALA8FA==}
 
   '@bufbuild/protobuf@2.15.0':
     resolution: {integrity: sha512-DAheWUkVr/SJTWCc+lg9dhY0eN4SaWlf4+bG1KzHeXbnqt0AfB/NX0Z+VunGlM1ki1B4zVvye27MpKh/svySUA==}
@@ -2105,8 +2108,8 @@ packages:
     resolution: {integrity: sha512-oahGvuMGQlPw/ivIYBjVSrWAfWLBeku5tpPE2fOPLi+WHffIWbuh2tCjhyQhTBPMf5E9jDEH4FOmTYgYwbKwtQ==}
     engines: {node: '>=18'}
 
-  globals@17.5.0:
-    resolution: {integrity: sha512-qoV+HK2yFl/366t2/Cb3+xxPUo5BuMynomoDmiaZBIdbs+0pYbjfZU+twLhGKp4uCZ/+NbtpVepH5bGCxRyy2g==}
+  globals@17.12.0:
+    resolution: {integrity: sha512-cezEd/DTyyht9cvSSURyygXPfy04GtWO/5e6ZPvH7fCtjKz9PYOmuawphw1Ctd1f6C+5JypXfGD7ahNMXvevBA==}
     engines: {node: '>=18'}
 
   globalthis@1.0.4:
@@ -3790,6 +3793,8 @@ snapshots:
       '@bufbuild/buf-linux-x64': 1.73.0
       '@bufbuild/buf-win32-arm64': 1.73.0
       '@bufbuild/buf-win32-x64': 1.73.0
+
+  '@bufbuild/protobuf@2.12.0': {}
 
   '@bufbuild/protobuf@2.15.0': {}
 
@@ -5498,7 +5503,7 @@ snapshots:
 
   globals@14.0.0: {}
 
-  globals@17.5.0: {}
+  globals@17.12.0: {}
 
   globalthis@1.0.4:
     dependencies:
