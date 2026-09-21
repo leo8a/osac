@@ -80,7 +80,9 @@ def test_compute_instance_api_fields(
         # Mutability: vCPUs
         _, rc = k8s_hub_client.patch(resource="computeinstance", name=instance_name, patch='{"spec":{"vcpus":8}}')
         assert rc == 0, "vCPUs update should succeed"
-        assert k8s_hub_client.get_jsonpath(resource="computeinstance", name=instance_name, jsonpath="{.spec.vcpus}") == "8"
+        assert (
+            k8s_hub_client.get_jsonpath(resource="computeinstance", name=instance_name, jsonpath="{.spec.vcpus}") == "8"
+        )
 
         # Mutability: memoryGiB
         _, rc = k8s_hub_client.patch(resource="computeinstance", name=instance_name, patch='{"spec":{"memoryGiB":16}}')
