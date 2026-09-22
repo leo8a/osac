@@ -167,8 +167,8 @@ var _ = Describe("Storage tiers server", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		// defaultBackend returns a BackendAssociation with distinct, non-zero values for every field,
-		// so tests can assert each one survived the flatten without ambiguity.
+		// defaultBackend returns a valid BackendAssociation with deterministic values for private
+		// creation and filter-rejection tests.
 		defaultBackend := func() *privatev1.BackendAssociation {
 			return privatev1.BackendAssociation_builder{
 				BackendId:            backendID,
@@ -179,7 +179,7 @@ var _ = Describe("Storage tiers server", func() {
 		}
 
 		// createTier creates a StorageTier via the private server (which enforces exactly one backend
-		// association) so tests exercise the public server's delegation and flattening.
+		// association) so tests exercise the public server's delegation and tier-level projection.
 		createTier := func(name string, backend *privatev1.BackendAssociation) *privatev1.StorageTier {
 			response, err := privateServer.Create(ctx, privatev1.StorageTiersCreateRequest_builder{
 				Object: privatev1.StorageTier_builder{
@@ -221,7 +221,7 @@ var _ = Describe("Storage tiers server", func() {
 			return response.GetObject().GetId()
 		}
 
-		It("Get flattens the backend association into the public spec", func() {
+		It("Get maps tier-level fields into the public spec", func() {
 			created := createTier("test-tier", defaultBackend())
 
 			response, err := publicServer.Get(ctx, publicv1.StorageTiersGetRequest_builder{
@@ -246,7 +246,7 @@ var _ = Describe("Storage tiers server", func() {
 			Expect(st.Code()).To(Equal(codes.NotFound))
 		})
 
-		It("List flattens the backend association for every item", func() {
+		It("List maps tier-level fields for every item", func() {
 			const count = 3
 			for i := range count {
 				createTier(fmt.Sprintf("tier-%d", i), defaultBackend())
