@@ -62,8 +62,9 @@ func ValidateTemplateParameters(
 		if len(templateParameters) == 0 {
 			return grpcstatus.Errorf(
 				grpccodes.InvalidArgument,
-				"template '%s' does not accept any template parameters",
+				"template '%s' does not accept any template parameters, but received: %s",
 				templateID,
+				strings.Join(invalidParameterNames, ", "),
 			)
 		}
 		templateParameterNames := make([]string, len(templateParameters))
