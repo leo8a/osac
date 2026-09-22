@@ -245,7 +245,7 @@ func (s *StorageTiersServer) toPublicTier(ctx context.Context, privateTier *priv
 	}
 
 	backends := privateTier.GetSpec().GetBackends()
-	if len(backends) != 1 {
+	if len(backends) == 0 {
 		s.logger.ErrorContext(ctx, "Storage tier has an unexpected number of backend associations",
 			slog.String("id", privateTier.GetId()), slog.Int("count", len(backends)))
 		return nil, grpcstatus.Errorf(grpccodes.Internal, "%s", errMsg)

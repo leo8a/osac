@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
@@ -313,6 +314,21 @@ var _ = Describe("Storage tiers server", func() {
 			Expect(response).To(BeNil())
 		})
 
+		It("List rejects a filter on a field removed from the public schema", func() {
+			// Seed a tier whose values would match if the filter were forwarded, so a
+			// delegated-but-empty result can't masquerade as rejection:
+			createTier("test-tier", defaultBackend())
+
+			response, err := publicServer.List(ctx, publicv1.StorageTiersListRequest_builder{
+				Filter: new("this.spec.max_read_bandwidth_mbs == 1000"),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			st, ok := status.FromError(err)
+			Expect(ok).To(BeTrue())
+			Expect(st.Code()).To(Equal(codes.InvalidArgument))
+			Expect(response).To(BeNil())
+		})
+
 		It("List forwards a filter on this.spec.protocol now that the path is shared with the private schema", func() {
 			nfsTier := createTier("nfs-tier", defaultBackend())
 
@@ -425,7 +441,7 @@ var _ = Describe("Storage tiers server", func() {
 			Expect(listResponse.GetTotal()).To(Equal(int32(3)))
 		})
 
-		It("Get returns Internal for a tier with more than one backend association", func() {
+		It("Get returns a tier with more than one backend association", func() {
 			tierDAO, err := dao.NewGenericDAO[*privatev1.StorageTier]().
 				SetLogger(logger).
 				SetTenancyLogic(tenancy).
@@ -457,13 +473,14 @@ var _ = Describe("Storage tiers server", func() {
 			Expect(err).ToNot(HaveOccurred())
 			multiID := createResponse.GetObject().GetId()
 
-			_, err = publicServer.Get(ctx, publicv1.StorageTiersGetRequest_builder{
+			response, err := publicServer.Get(ctx, publicv1.StorageTiersGetRequest_builder{
 				Id: multiID,
 			}.Build())
-			Expect(err).To(HaveOccurred())
-			st, ok := status.FromError(err)
-			Expect(ok).To(BeTrue())
-			Expect(st.Code()).To(Equal(codes.Internal))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(response.GetObject().GetId()).To(Equal(multiID))
+			Expect(response.GetObject().GetSpec().GetDescription()).To(Equal("two backends"))
+			Expect(response.GetObject().GetSpec().GetProtocol()).To(
+				Equal(publicv1.StorageProtocol_STORAGE_PROTOCOL_NFS))
 		})
 
 		It("toPublicStorageProtocol maps an out-of-range private value to UNSPECIFIED", func() {
@@ -492,6 +509,22 @@ var _ = Describe("Storage tiers server", func() {
 							"fields belong exclusively on BackendAssociation",
 						field.Name(),
 					))
+			}
+
+			reservedRanges := descriptor.ReservedRanges()
+			Expect(reservedRanges.Len()).To(Equal(3))
+			for _, number := range []protoreflect.FieldNumber{3, 4, 5} {
+				Expect(reservedRanges.Has(number)).To(BeTrue())
+			}
+
+			reservedNames := descriptor.ReservedNames()
+			Expect(reservedNames.Len()).To(Equal(3))
+			for _, name := range []string{
+				"max_read_bandwidth_mbs",
+				"max_write_bandwidth_mbs",
+				"encryption_enabled",
+			} {
+				Expect(reservedNames.Has(protoreflect.Name(name))).To(BeTrue())
 			}
 		})
 
