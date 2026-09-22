@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	buf.build/go/bufplugin v0.10.0
-	buf.build/go/protovalidate v1.2.0
+	buf.build/go/protovalidate v1.4.0
 	charm.land/glamour/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/Masterminds/semver/v3 v3.5.0
@@ -59,6 +59,7 @@ require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2 // indirect
 	buf.build/gen/go/pluginrpc/pluginrpc/protocolbuffers/go v1.36.12-20241007202033-cf42259fcbfc.2 // indirect
 	buf.build/go/spdx v0.2.0 // indirect
+	cel.dev/cel-go v0.32.0 // indirect
 	cel.dev/expr v0.25.3 // indirect
 	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
