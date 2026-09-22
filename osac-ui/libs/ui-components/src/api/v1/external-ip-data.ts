@@ -1,0 +1,171 @@
+import { useMemo } from 'react';
+
+import type { ExternalIP, ExternalIPAttachment, ExternalIPPool, NATGateway } from '@osac/types';
+import { ExternalIPAttachments, ExternalIPPools, ExternalIPs, NATGateways } from '@osac/types';
+
+import { cel } from '../cel';
+import { type ListParams } from '../types';
+import { useListResource } from '../use-resource';
+
+export type ExternalIpAttachedTargetKind =
+  | 'computeInstance'
+  | 'cluster'
+  | 'baremetalInstance'
+  | 'natGateway';
+
+export interface ExternalIpAttachedTarget {
+  kind: ExternalIpAttachedTargetKind;
+  id: string;
+  name: string;
+  href: string;
+}
+
+export const uniqueSortedIds = (values: Array<string | undefined>): string[] =>
+  [...new Set(values.filter((id): id is string => Boolean(id)))].sort();
+
+export const poolIdsFilter = (ids: readonly string[]) =>
+  cel<ExternalIPPool>((filter) => filter.field('id').isIn(ids));
+
+export const attachmentExternalIpIdsFilter = (ids: readonly string[]) =>
+  cel<ExternalIPAttachment>((filter) => filter.field('spec.externalIp.id').isIn(ids));
+
+export const natGatewayExternalIpIdsFilter = (ids: readonly string[]) =>
+  cel<NATGateway>((filter) => filter.field('spec.externalIp.id').isIn(ids));
+
+export const externalIpPoolId = (externalIp: ExternalIP): string | undefined =>
+  externalIp.spec?.pool?.id || externalIp.status?.pool || undefined;
+
+export const attachedTargetFromAttachment = (
+  attachment: ExternalIPAttachment,
+): ExternalIpAttachedTarget | undefined => {
+  const target = attachment.spec?.target;
+  if (target?.case === 'computeInstance' && target.value.id) {
+    return {
+      kind: 'computeInstance',
+      id: target.value.id,
+      name: target.value.name.trim() || target.value.id,
+      href: `/vms/${encodeURIComponent(target.value.id)}`,
+    };
+  }
+  if (target?.case === 'cluster' && target.value.id) {
+    return {
+      kind: 'cluster',
+      id: target.value.id,
+      name: target.value.name.trim() || target.value.id,
+      href: `/clusters/${encodeURIComponent(target.value.id)}`,
+    };
+  }
+  if (target?.case === 'baremetalInstance' && target.value.id) {
+    return {
+      kind: 'baremetalInstance',
+      id: target.value.id,
+      name: target.value.name.trim() || target.value.id,
+      href: `/bare-metal/${encodeURIComponent(target.value.id)}`,
+    };
+  }
+  return undefined;
+};
+
+export const attachedTargetFromNatGateway = (
+  natGateway: NATGateway,
+): ExternalIpAttachedTarget | undefined => {
+  const virtualNetworkId = natGateway.spec?.virtualNetwork?.id;
+  if (!natGateway.id || !virtualNetworkId) {
+    return undefined;
+  }
+  const name =
+    natGateway.metadata?.name?.trim() ||
+    natGateway.spec?.virtualNetwork?.name?.trim() ||
+    natGateway.id;
+  return {
+    kind: 'natGateway',
+    id: natGateway.id,
+    name,
+    href: `/networking/virtual-networks/${encodeURIComponent(virtualNetworkId)}`,
+  };
+};
+
+export const buildAttachedTargetsByExternalIpId = (
+  attachments: readonly ExternalIPAttachment[],
+  natGateways: readonly NATGateway[] = [],
+): Record<string, ExternalIpAttachedTarget> => {
+  const byExternalIpId: Record<string, ExternalIpAttachedTarget> = {};
+  for (const natGateway of natGateways) {
+    const externalIpId = natGateway.spec?.externalIp?.id;
+    const target = attachedTargetFromNatGateway(natGateway);
+    if (externalIpId && target) {
+      byExternalIpId[externalIpId] = target;
+    }
+  }
+  for (const attachment of attachments) {
+    const externalIpId = attachment.spec?.externalIp?.id;
+    const target = attachedTargetFromAttachment(attachment);
+    if (externalIpId && target) {
+      byExternalIpId[externalIpId] = target;
+    }
+  }
+  return byExternalIpId;
+};
+
+export const buildPoolsById = (pools: readonly ExternalIPPool[]): Record<string, ExternalIPPool> =>
+  Object.fromEntries(pools.map((pool) => [pool.id, pool]));
+
+export const useExternalIpJoins = (externalIps: readonly ExternalIP[]) => {
+  const poolIds = useMemo(() => uniqueSortedIds(externalIps.map(externalIpPoolId)), [externalIps]);
+  const externalIpIds = useMemo(
+    () => uniqueSortedIds(externalIps.map((externalIp) => externalIp.id)),
+    [externalIps],
+  );
+
+  const poolsQuery = useListResource(
+    ExternalIPPools,
+    poolIds.length > 0 ? { filter: poolIdsFilter(poolIds), limit: poolIds.length } : {},
+    { enabled: poolIds.length > 0 },
+  );
+  const attachmentsQuery = useListResource(
+    ExternalIPAttachments,
+    externalIpIds.length > 0
+      ? { filter: attachmentExternalIpIdsFilter(externalIpIds), limit: externalIpIds.length }
+      : {},
+    { enabled: externalIpIds.length > 0 },
+  );
+  const natGatewaysQuery = useListResource(
+    NATGateways,
+    externalIpIds.length > 0
+      ? { filter: natGatewayExternalIpIdsFilter(externalIpIds), limit: externalIpIds.length }
+      : {},
+    { enabled: externalIpIds.length > 0 },
+  );
+
+  return {
+    poolsById: useMemo(
+      () => buildPoolsById(poolsQuery.data?.items ?? []),
+      [poolsQuery.data?.items],
+    ),
+    attachedTargetsByExternalIpId: useMemo(
+      () =>
+        buildAttachedTargetsByExternalIpId(
+          attachmentsQuery.data?.items ?? [],
+          natGatewaysQuery.data?.items ?? [],
+        ),
+      [attachmentsQuery.data?.items, natGatewaysQuery.data?.items],
+    ),
+    isLoading: poolsQuery.isLoading || attachmentsQuery.isLoading || natGatewaysQuery.isLoading,
+    error: poolsQuery.error ?? attachmentsQuery.error ?? natGatewaysQuery.error,
+  };
+};
+
+export const useExternalIpsData = (params: ListParams = {}) => {
+  const externalIpsQuery = useListResource(ExternalIPs, params);
+  const externalIps = externalIpsQuery.data?.items ?? [];
+  const joins = useExternalIpJoins(externalIps);
+  const hasDisplayedIps = externalIps.length > 0;
+
+  return {
+    externalIps,
+    poolsById: joins.poolsById,
+    attachedTargetsByExternalIpId: joins.attachedTargetsByExternalIpId,
+    isLoading: externalIpsQuery.isLoading || (hasDisplayedIps && joins.isLoading),
+    error: externalIpsQuery.error ?? joins.error,
+  };
+};

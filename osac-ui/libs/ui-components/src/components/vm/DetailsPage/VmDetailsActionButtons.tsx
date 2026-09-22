@@ -26,7 +26,6 @@ const VmDetailsActionButtons = ({ vm }: VmDetailsActionButtonsProps) => {
   const [attachExternalIpOpen, setAttachExternalIpOpen] = useState(false);
   const { runPowerAction } = useVmPowerAction();
 
-  const name = vm.metadata?.name ?? vm.id;
   const state = vm.status?.state;
   const canStart = state === ComputeInstanceState.STOPPED;
   const canStop = state === ComputeInstanceState.RUNNING || state === ComputeInstanceState.PAUSED;
@@ -63,7 +62,7 @@ const VmDetailsActionButtons = ({ vm }: VmDetailsActionButtonsProps) => {
           isDisabled={!canStart}
           onClick={() => {
             if (canStart) {
-              runPowerAction(vm.id, name, 'start');
+              runPowerAction(vm.id, 'start');
             }
           }}
         >
@@ -75,7 +74,7 @@ const VmDetailsActionButtons = ({ vm }: VmDetailsActionButtonsProps) => {
           isDisabled={!canStop}
           onClick={() => {
             if (canStop) {
-              runPowerAction(vm.id, name, 'stop');
+              runPowerAction(vm.id, 'stop');
             }
           }}
         >
@@ -87,7 +86,7 @@ const VmDetailsActionButtons = ({ vm }: VmDetailsActionButtonsProps) => {
           isDisabled={!canRestart}
           onClick={() => {
             if (canRestart) {
-              runPowerAction(vm.id, name, 'restart');
+              runPowerAction(vm.id, 'restart');
             }
           }}
         >

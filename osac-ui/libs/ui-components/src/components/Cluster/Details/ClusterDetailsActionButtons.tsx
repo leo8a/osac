@@ -25,7 +25,6 @@ const ClusterDetailsActionButtons = ({ cluster }: ClusterDetailsActionButtonsPro
   const { download, isPending, error, setError } = useDownloadKubeconfig();
 
   const isReady = cluster.status?.state === ClusterState.READY;
-  const canDelete = cluster.status?.state !== ClusterState.DELETING;
   const clusterName = cluster.metadata?.name ?? cluster.id;
   const kubeconfigSecretId = cluster.status?.kubeconfigSecret?.id ?? '';
   const passwordSecretId = cluster.status?.passwordSecret?.id ?? '';
@@ -88,16 +87,7 @@ const ClusterDetailsActionButtons = ({ cluster }: ClusterDetailsActionButtonsPro
         >
           {t('View password')}
         </Button>
-        <Button
-          variant="danger"
-          icon={<DumpsterIcon />}
-          isDisabled={!canDelete}
-          onClick={() => {
-            if (canDelete) {
-              setDeleteOpen(true);
-            }
-          }}
-        >
+        <Button variant="danger" icon={<DumpsterIcon />} onClick={() => setDeleteOpen(true)}>
           {t('Delete')}
         </Button>
       </Flex>

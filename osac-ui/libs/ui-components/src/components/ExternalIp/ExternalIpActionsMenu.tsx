@@ -2,25 +2,28 @@ import { useState } from 'react';
 import { Dropdown, DropdownItem, DropdownList, MenuToggle } from '@patternfly/react-core';
 import { EllipsisVIcon } from '@patternfly/react-icons/dist/esm/icons/ellipsis-v-icon';
 
-import type { Cluster } from '@osac/types';
+import type { ExternalIP } from '@osac/types';
 
-import ClusterDeleteConfirmModal from './ClusterDeleteConfirmModal';
+import ExternalIpDeleteModal from './ExternalIpDeleteModal';
+import { canDeleteExternalIp, externalIpDisplayName } from './utils';
 import { useTranslation } from '../../hooks/useTranslation';
 
-interface ClusterActionsMenuProps {
-  cluster: Cluster;
+interface ExternalIpActionsMenuProps {
+  externalIp: ExternalIP;
 }
 
-const ClusterActionsMenu = ({ cluster }: ClusterActionsMenuProps) => {
+const ExternalIpActionsMenu = ({ externalIp }: ExternalIpActionsMenuProps) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const displayName = externalIpDisplayName(externalIp);
+  const canDelete = canDeleteExternalIp(externalIp);
 
   return (
     <>
       {deleteOpen && (
-        <ClusterDeleteConfirmModal
-          cluster={cluster}
+        <ExternalIpDeleteModal
+          externalIp={externalIp}
           onClose={() => setDeleteOpen(false)}
           onSuccess={() => setDeleteOpen(false)}
         />
@@ -28,12 +31,14 @@ const ClusterActionsMenu = ({ cluster }: ClusterActionsMenuProps) => {
       <Dropdown
         isOpen={open}
         onOpenChange={setOpen}
+        onSelect={() => setOpen(false)}
         toggle={(ref) => (
           <MenuToggle
             ref={ref}
             variant="plain"
-            onClick={() => setOpen((o) => !o)}
-            aria-label={t('Actions for {{name}}', { name: cluster.metadata?.name ?? cluster.id })}
+            onClick={() => setOpen((wasOpen) => !wasOpen)}
+            isExpanded={open}
+            aria-label={t('Actions for {{name}}', { name: displayName })}
           >
             <EllipsisVIcon />
           </MenuToggle>
@@ -43,7 +48,13 @@ const ClusterActionsMenu = ({ cluster }: ClusterActionsMenuProps) => {
         <DropdownList>
           <DropdownItem
             value="delete"
+            isDanger
+            isDisabled={!canDelete}
+            description={canDelete ? undefined : t('Detach this external IP before deleting it.')}
             onClick={() => {
+              if (!canDelete) {
+                return;
+              }
               setDeleteOpen(true);
               setOpen(false);
             }}
@@ -56,4 +67,4 @@ const ClusterActionsMenu = ({ cluster }: ClusterActionsMenuProps) => {
   );
 };
 
-export default ClusterActionsMenu;
+export default ExternalIpActionsMenu;
