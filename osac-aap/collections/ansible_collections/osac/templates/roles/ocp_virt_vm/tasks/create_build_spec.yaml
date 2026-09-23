@@ -121,3 +121,23 @@
               deviceName: "{{ compute_instance.spec.gpu.resourceName }}"
   loop: "{{ range(compute_instance.spec.gpu.count | int) | list }}"
   when: compute_instance.spec.gpu is defined
+
+# GPUs (e.g. AMD Instinct MI325X) expose very large PCI BARs that can only be
+# mapped with UEFI (OVMF) + above-4G decoding. Under the Linux default SeaBIOS
+# the guest hangs early at boot with a blank console. Windows already boots UEFI
+# in its base spec (secureBoot: true) above, so scope this to Linux to avoid
+# downgrading Windows Secure Boot. secureBoot: false matches the KubeVirt-native
+# reference GPU VM and avoids requiring guest Secure Boot support.
+- name: Boot Linux GPU VMs with UEFI (large GPU PCI BARs need OVMF + above-4G decoding)
+  ansible.builtin.set_fact:
+    vm_template_spec: "{{ vm_template_spec | combine(efi_patch, recursive=True) }}"
+  vars:
+    efi_patch:
+      domain:
+        firmware:
+          bootloader:
+            efi:
+              secureBoot: false
+  when:
+    - compute_instance.spec.gpu is defined
+    - guest_os_family != 'windows'
