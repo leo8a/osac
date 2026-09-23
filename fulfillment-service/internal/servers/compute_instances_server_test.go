@@ -15,6 +15,9 @@ package servers
 
 import (
 	"fmt"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -25,9 +28,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 var _ = Describe("Compute instances server", func() {
@@ -145,7 +148,7 @@ var _ = Describe("Compute instances server", func() {
 						Tenant: testTenant,
 					}.Build(),
 					Spec: privatev1.InstanceTypeSpec_builder{
-						Cores:     4,
+						Vcpus:     4,
 						MemoryGib: 16,
 						State:     privatev1.InstanceTypeState_INSTANCE_TYPE_STATE_ACTIVE,
 					}.Build(),
@@ -164,7 +167,7 @@ var _ = Describe("Compute instances server", func() {
 					Id: "standard",
 					Metadata: privatev1.Metadata_builder{
 						Name:   "standard",
-						Tenant: testTenant,
+						Tenant: "shared",
 					}.Build(),
 					Spec: privatev1.StorageTierSpec_builder{
 						Description: "Standard storage tier",
@@ -230,7 +233,7 @@ var _ = Describe("Compute instances server", func() {
 					{
 						Name:        "cpu_count",
 						Title:       "CPU Count",
-						Description: "Number of CPU cores",
+						Description: "Number of vCPUs",
 						Required:    false,
 						Type:        "type.googleapis.com/google.protobuf.Int32Value",
 						Default:     cpuDefault,
@@ -645,4 +648,40 @@ var _ = Describe("Compute instances server", func() {
 			Expect(spec.GetBootDisk().GetSizeGib()).To(Equal(int32(10)))
 		})
 	})
+})
+
+var _ = Describe("Catalog publication and references", func() {
+	DescribeTable("resolves same-name catalog creation sources in the requested tenant", func(shared bool) {
+		Expect(seedComputeCatalogItemTemplate(ctx, auth.SharedTenant, "", "source-template")).To(Succeed())
+		catalogs, err := NewPrivateComputeInstanceCatalogItemsServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+		Expect(err).ToNot(HaveOccurred())
+		for _, tenant := range []string{testTenant, auth.SharedTenant} {
+			_, err = catalogs.Create(ctx, privatev1.ComputeInstanceCatalogItemsCreateRequest_builder{Object: privatev1.ComputeInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: "same-name", Tenant: tenant}.Build(), Title: "Offering", Published: tenant == auth.SharedTenant,
+				Template: privatev1.ComputeInstanceTemplateReference_builder{Id: "source-template"}.Build(),
+			}.Build()}.Build())
+			Expect(err).ToNot(HaveOccurred())
+		}
+		server, err := NewComputeInstancesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+		Expect(err).ToNot(HaveOccurred())
+		request := publicv1.ComputeInstancesCreateRequest_builder{Object: publicv1.ComputeInstance_builder{
+			Metadata: publicv1.Metadata_builder{Name: "vm"}.Build(), Spec: publicv1.ComputeInstanceSpec_builder{
+				CatalogItem: publicv1.ComputeInstanceCatalogItemReference_builder{Name: "same-name", Shared: shared}.Build(),
+			}.Build(),
+		}.Build()}.Build()
+		original := proto.Clone(request)
+		_, err = server.Create(ctx, request)
+		if shared {
+			// Correct shared source reaches ordinary required-field validation.
+			Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+			Expect(status.Convert(err).Message()).To(ContainSubstring("instance_type"))
+		} else {
+			Expect(status.Code(err)).To(Equal(codes.NotFound))
+			Expect(status.Convert(err).Message()).To(ContainSubstring("not published"))
+		}
+		Expect(proto.Equal(request, original)).To(BeTrue())
+	},
+		Entry("selects the published shared item", true),
+		Entry("rejects the unpublished tenant item", false),
+	)
 })

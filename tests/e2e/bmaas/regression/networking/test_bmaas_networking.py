@@ -145,6 +145,16 @@ class TestBmaasNetworking:
             delay=5,
             description=f"NATGateway {nat_name} to become Ready",
         )
+        nat_cr_name = poll_until(
+            fn=lambda: k8s_hub_client.get_nat_gateway_name(uuid=nat_id, checked=False),
+            until=lambda name: name != "",
+            retries=30,
+            delay=5,
+            description=f"NATGateway CR for {nat_name}",
+        )
+        assert k8s_hub_client.get_jsonpath(
+            resource="natgateway", name=nat_cr_name, jsonpath="{.status.stateTransitionTime}"
+        )
 
         self.__class__.state.update(
             nat_eip_id=nat_eip_id, nat_eip_cr=nat_eip_cr, nat_eip_name=nat_eip_name, nat_id=nat_id, nat_name=nat_name
@@ -159,6 +169,7 @@ class TestBmaasNetworking:
         k8s_hub_client: K8sClient,
         catalog_item_name: str,
         auto_eip_catalog_item_name: str,
+        bmi_disk_image: str,
         net_ssh_public_key: str,
         bmh_namespace: str,
         net_test_run_id: str,
@@ -179,6 +190,7 @@ class TestBmaasNetworking:
                 name=bmi_name,
                 catalog_item=catalog,
                 ssh_key=net_ssh_public_key,
+                disk_image=bmi_disk_image,
                 network_attachments=[f"subnet={subnet_id},interface=eth9,primary,security-groups={sg}"],
                 external_ip_attachment=is_auto_eip,
             )
@@ -217,7 +229,9 @@ class TestBmaasNetworking:
         self.__class__.state["bmi2"] = bmis[1]
         self.__class__.state["bmi3"] = bmis[2]
 
-    def test_05b_verify_auto_eip_on_bmi3(self, grpc: GRPCClient) -> None:
+    def test_05b_verify_auto_eip_on_bmi3(
+        self, grpc: GRPCClient, private_grpc: GRPCClient, k8s_hub_client: K8sClient
+    ) -> None:
         _require(self.state, "bmi3")
         bmi3 = self.state["bmi3"]
 
@@ -238,12 +252,24 @@ class TestBmaasNetworking:
         )
 
         auto_attach_id = attachment["id"]
+        auto_attach_cr = wait_for_external_ip_attachment_cr(k8s=k8s_hub_client, uuid=auto_attach_id)
+        wait_for_external_ip_attachment_ready(k8s=k8s_hub_client, name=auto_attach_cr)
         auto_eip_ref = attachment.get("spec", {}).get("externalIp", {}).get("id", "")
         assert auto_eip_ref, "Auto-created attachment has no ExternalIP reference"
 
         eip_data = grpc.get_external_ip(external_ip_id=auto_eip_ref)
         auto_ext_addr = eip_data.get("object", {}).get("status", {}).get("address", "")
         assert auto_ext_addr, "Auto-created ExternalIP has no allocated address"
+        _private_eip = poll_until(
+            fn=lambda: private_grpc.get_private_external_ip(external_ip_id=auto_eip_ref)["object"],
+            until=lambda item: (
+                item["status"].get("attribution", {}).get("baremetalInstance", {}).get("id") == bmi3["id"]
+                and bool(item["status"].get("attachmentTransitionTime"))
+            ),
+            retries=30,
+            delay=5,
+            description="auto-created ExternalIP attribution settlement for BMI3",
+        )
 
         self.__class__.state.update(
             auto_attach_id=auto_attach_id, auto_eip_id=auto_eip_ref, auto_ext_addr=auto_ext_addr
@@ -322,7 +348,9 @@ class TestBmaasNetworking:
             description=f"NAT gateway egress curl quay.io (ssh_host={bmi1['ssh_host']}, tenant_ip={bmi1['ip']})",
         )
 
-    def test_12_external_ip_ingress(self, grpc: GRPCClient, k8s_hub_client: K8sClient, net_test_run_id: str) -> None:
+    def test_12_external_ip_ingress(
+        self, grpc: GRPCClient, private_grpc: GRPCClient, k8s_hub_client: K8sClient, net_test_run_id: str
+    ) -> None:
         _require(self.state, "bmi1", "pool_id")
         bmi1 = self.state["bmi1"]
 
@@ -337,6 +365,16 @@ class TestBmaasNetworking:
         )
         attach_cr = wait_for_external_ip_attachment_cr(k8s=k8s_hub_client, uuid=attach_id)
         wait_for_external_ip_attachment_ready(k8s=k8s_hub_client, name=attach_cr)
+        poll_until(
+            fn=lambda: private_grpc.get_private_external_ip(external_ip_id=eip_id)["object"],
+            until=lambda item: (
+                item["status"].get("attribution", {}).get("baremetalInstance", {}).get("id") == bmi1["id"]
+                and bool(item["status"].get("attachmentTransitionTime"))
+            ),
+            retries=30,
+            delay=5,
+            description="ingress ExternalIP attribution settlement",
+        )
 
         eip_data = grpc.get_external_ip(external_ip_id=eip_id)
         ext_addr = eip_data.get("object", {}).get("status", {}).get("address", "")

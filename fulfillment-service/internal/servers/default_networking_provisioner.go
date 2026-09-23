@@ -24,11 +24,10 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
-	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 const defaultLabel = "osac.openshift.io/default"
@@ -59,6 +58,7 @@ type DefaultNetworkingProvisioner struct {
 	externalIPPoolDao *dao.GenericDAO[*privatev1.ExternalIPPool]
 	natGatewayDao     *dao.GenericDAO[*privatev1.NATGateway]
 	tenantDao         *dao.GenericDAO[*privatev1.Tenant]
+	lifecycle         *externalIPLifecycle
 }
 
 func NewDefaultNetworkingProvisioner() *DefaultNetworkingProvisionerBuilder {
@@ -102,18 +102,18 @@ func makeNotifyCallback[O dao.Object](notifier events.Notifier) dao.EventCallbac
 		}
 	}
 	return func(ctx context.Context, e dao.Event) error {
-		event := &privatev1.Event{}
-		event.SetId(uuid.New())
+		var eventType privatev1.EventType
 		switch e.Type {
 		case dao.EventTypeCreated:
-			event.SetType(privatev1.EventType_EVENT_TYPE_OBJECT_CREATED)
+			eventType = privatev1.EventType_EVENT_TYPE_OBJECT_CREATED
 		case dao.EventTypeUpdated:
-			event.SetType(privatev1.EventType_EVENT_TYPE_OBJECT_UPDATED)
+			eventType = privatev1.EventType_EVENT_TYPE_OBJECT_UPDATED
 		case dao.EventTypeDeleted:
-			event.SetType(privatev1.EventType_EVENT_TYPE_OBJECT_DELETED)
+			eventType = privatev1.EventType_EVENT_TYPE_OBJECT_DELETED
 		default:
 			return fmt.Errorf("unknown event type '%s'", e.Type)
 		}
+		event := newEvent(eventType)
 		if payloadField != nil {
 			event.ProtoReflect().Set(payloadField, protoreflect.ValueOfMessage(e.Object.ProtoReflect()))
 		}
@@ -229,6 +229,16 @@ func (b *DefaultNetworkingProvisionerBuilder) Build() (result *DefaultNetworking
 		natGatewayDao:     natGatewayDao,
 		tenantDao:         tenantDao,
 	}
+	result.lifecycle = newExternalIPLifecycle(
+		externalIPDao,
+		nil,
+		natGatewayDao,
+		externalIPPoolDao,
+		nil,
+		nil,
+		nil,
+		virtualNetworkDao,
+	)
 	return
 }
 
@@ -427,17 +437,17 @@ func (p *DefaultNetworkingProvisioner) provisionNATGateway(
 		return err
 	}
 
+	err = p.lifecycle.lockNewNATGatewayReferences(ctx, externalIPID, vnID)
+	if err != nil {
+		return err
+	}
+
 	err = p.updatePoolCapacity(ctx, pool.GetId(), int64(1))
 	if err != nil {
 		return err
 	}
 
 	_, err = p.createDefaultNATGateway(ctx, tenantName, vnID, externalIPID)
-	if err != nil {
-		return err
-	}
-
-	err = p.updateExternalIPAttachedFlag(ctx, externalIPID, true)
 	if err != nil {
 		return err
 	}
@@ -530,25 +540,6 @@ func (p *DefaultNetworkingProvisioner) updatePoolCapacity(ctx context.Context, p
 	_, err = p.externalIPPoolDao.Update().SetObject(pool).Do(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to update ExternalIPPool capacity: %w", err)
-	}
-	return nil
-}
-
-func (p *DefaultNetworkingProvisioner) updateExternalIPAttachedFlag(ctx context.Context, externalIPID string, attached bool) error {
-	getResponse, err := p.externalIPDao.Get().
-		SetId(externalIPID).
-		SetLock(true).
-		Do(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get ExternalIP for attached flag update: %w", err)
-	}
-
-	eip := getResponse.GetObject()
-	eip.GetStatus().SetAttached(attached)
-
-	_, err = p.externalIPDao.Update().SetObject(eip).Do(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to update ExternalIP attached flag: %w", err)
 	}
 	return nil
 }
@@ -651,14 +642,13 @@ func (p *DefaultNetworkingProvisioner) deprovisionDefaultNATGateway(ctx context.
 			// its ExternalIP must be left alone until the NATGateway is actually archived, or the
 			// ExternalIP would be released while the NATGateway still references it.
 			archived := len(ng.GetMetadata().GetFinalizers()) == 0
-			externalIPID := ng.GetSpec().GetExternalIp().GetId()
-			if _, err := p.natGatewayDao.Delete().SetId(id).Do(ctx); err != nil {
-				return err
-			}
-			if !archived || externalIPID == "" {
+			if archived {
+				if err := p.lifecycle.deleteNATGatewayAndExternalIP(ctx, id); err != nil {
+					return err
+				}
 				continue
 			}
-			if err := p.deprovisionDefaultExternalIP(ctx, externalIPID); err != nil {
+			if err := p.lifecycle.deleteNATGateway(ctx, id); err != nil {
 				return err
 			}
 		}
@@ -671,22 +661,6 @@ func (p *DefaultNetworkingProvisioner) deprovisionDefaultNATGateway(ctx context.
 			}
 		}
 	}
-}
-
-// deprovisionDefaultExternalIP deletes the given ExternalIP and releases its pool capacity.
-func (p *DefaultNetworkingProvisioner) deprovisionDefaultExternalIP(ctx context.Context, externalIPID string) error {
-	getResponse, err := p.externalIPDao.Get().SetId(externalIPID).Do(ctx)
-	if err != nil {
-		return err
-	}
-	poolID := getResponse.GetObject().GetSpec().GetPool().GetId()
-	if _, err := p.externalIPDao.Delete().SetId(externalIPID).Do(ctx); err != nil {
-		return err
-	}
-	if poolID == "" {
-		return nil
-	}
-	return p.updatePoolCapacity(ctx, poolID, int64(-1))
 }
 
 // deleteByVirtualNetwork deletes every default-labeled object of type O whose spec references the

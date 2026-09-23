@@ -56,11 +56,11 @@ The nearest component `AGENTS.md` adds rules for files under that component.
 
 ## Cross-component boundaries
 
-- Fulfillment API source is under `fulfillment-service/proto/private/`; consumers include the operator, AAP, metering service, and CSI driver.
-- After changing private fulfillment protos, run `buf generate` in each affected generated-code consumer: `osac-operator/`, `osac-metering/metering-service/`, and, for volume/storage protos, `osac-csi-driver/`. Never edit their `internal/api/` directories manually.
+- The Fulfillment API is the shared top-level `proto/` module: sources under `proto/private/`, one committed generated Go tree at `proto/gen/`, imported by every consumer (fulfillment-service, operator, metering-service, CSI driver) as `github.com/osac-project/osac/proto/gen/...`.
+- After changing protos, regenerate ONCE: `make -C proto generate`, then commit `proto/private/` (or `proto/tests/`), `proto/public/`, and `proto/gen/`. See [`proto/AGENTS.md`](proto/AGENTS.md). Never hand-edit `proto/public/` or `proto/gen/`.
 - Cross-component architecture and dependency conventions are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).
 - E2E tests belong under [`tests/e2e/`](tests/e2e/) and follow [`tests/e2e/AGENTS.md`](tests/e2e/AGENTS.md).
-- Bootstrap-created sibling checkouts are separate repositories; do not include their changes in a mono-repo PR. The `osac-ux/` checkout is read-only.
+- Bootstrap-created sibling checkouts are separate repositories; do not include their changes in a mono-repo PR. The `osac-ux/` checkout is read-only. The tracked `osac-ui/` component is part of this mono-repo.
 
 
 ## AI-assisted development setup
@@ -73,9 +73,16 @@ forks writable repositories using authenticated `gh`; use
 
 ### External repositories
 
-- `osac-ui/` is the writable UI repository; `osac-ux/` is a read-only UX/API reference.
-- `enhancement-proposals/` is the writable PRD/design repository; `osac-docs/` is the writable project documentation repository.
+- `osac-ux/` is a read-only UX/API reference. The tracked `osac-ui/` component is built and released as part of this repository.
+- `enhancement-proposals/` is the writable PRD/design repository. Project documentation (formerly the separate `osac-project/docs` repo, cloned as `osac-docs/`) now lives in-tree under [`docs/`](docs/README.md).
 - `osac-test-infra` is not cloned automatically. It owns infrastructure backends and reusable workflows; E2E suites remain in `tests/e2e/`.
-- After `tools/bootstrap.sh` creates sibling checkouts, read their local instructions when working there: `osac-ui/AGENTS.md`, `enhancement-proposals/AGENTS.md`, and `osac-docs/AGENTS.md`.
+- After `tools/bootstrap.sh` creates sibling checkouts, read their local instructions when working there: `enhancement-proposals/AGENTS.md`. When working in the tracked `osac-ui/` component, read `osac-ui/AGENTS.md`.
 - These checkouts are separate Git repositories; never include their changes in a mono-repo PR.
 - Never assume remote names. Use `~/.osac-ai-skills/tools/resolve-remotes.sh` or `.osac-ai-skills/tools/resolve-remotes.sh`; if neither exists, run `tools/bootstrap.sh`.
+
+## Integration testing policy
+
+Use the affected component's touched-area map and the relevant section of
+[Integration testing](docs/INTEGRATION-TESTING.md) for tiers, commands, and
+coverage boundaries. Keep both current when suites change, and link missing
+coverage to its owning follow-up ticket using the Jira URL.

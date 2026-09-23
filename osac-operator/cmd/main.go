@@ -62,7 +62,6 @@ import (
 	bmfov1alpha1 "github.com/osac-project/osac/bare-metal-fulfillment-operator/api/v1alpha1"
 	v1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac/osac-operator/helpers"
-	privatev1 "github.com/osac-project/osac/osac-operator/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/osac-operator/internal/controller"
 	"github.com/osac-project/osac/osac-operator/internal/dispatcheradapter"
 	"github.com/osac-project/osac/osac-operator/internal/migrations"
@@ -70,6 +69,7 @@ import (
 	"github.com/osac-project/osac/osac-operator/pkg/dispatcher"
 	"github.com/osac-project/osac/osac-operator/pkg/networkmanager"
 	"github.com/osac-project/osac/osac-operator/pkg/provisioning"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -88,12 +88,12 @@ const (
 	// envStorageConfigNamespace is the namespace holding the per-tenant
 	// "lvms-tenant-config-<tenant>" Secrets the storage controller reads.
 	envStorageConfigNamespace = "OSAC_STORAGE_CONFIG_NAMESPACE"
-	// envVendorControllers maps StorageBackend names to vendor CSI controller
+	// envVendorControllers maps provider identifiers to vendor CSI controller
 	// gRPC endpoints, comma-separated (e.g.
 	// "vast=vast-csi-controller.osac-csi-backends.svc:50051").
 	envVendorControllers = "OSAC_VENDOR_CONTROLLERS"
 	// defaultStorageConfigNamespace mirrors the osac-aap/storage controller
-	// default used when OSAC_STORAGE_CONFIG_NAMESPACE is unset.
+	// default used when OSAC_STORAGE_CONFIG_NAMESPACE is unset
 	defaultStorageConfigNamespace = "osac-system"
 
 	// AAP configuration
@@ -104,6 +104,10 @@ const (
 	envAAPStatusPollInterval  = "OSAC_AAP_STATUS_POLL_INTERVAL"
 	envAAPInsecureSkipVerify  = "OSAC_AAP_INSECURE_SKIP_VERIFY"
 	envAAPTemplatePrefix      = "OSAC_AAP_TEMPLATE_PREFIX"
+
+	// External fulfillment configuration passed to tenant-cluster AAP jobs
+	envFulfillmentEndpoint  = "OSAC_FULFILLMENT_ENDPOINT"
+	envFulfillmentIssuerURL = "OSAC_FULFILLMENT_ISSUER_URL"
 
 	// Cluster (ClusterOrder) AAP template overrides
 	envClusterAAPProvisionTemplate                  = "OSAC_CLUSTER_AAP_PROVISION_TEMPLATE"
@@ -193,7 +197,7 @@ func registerControllerFlags() *controllerFlags {
 
 // enableAllIfNoneSet enables all controllers if none are explicitly enabled.
 //
-// The Volume controller is included now that it has a real vendor provisioner.
+// The Volume controller is included now that it has real vendor provisioners.
 // When no vendor controllers are configured (OSAC_VENDOR_CONTROLLERS unset), the
 // controller still starts but runs with provisioning disabled: it never fails
 // the operator startup, so an unconfigured vendor backend cannot take down the
@@ -287,11 +291,14 @@ func createAAPProvider(
 	statusPollInterval := helpers.GetEnvWithDefault(envAAPStatusPollInterval, provisioning.DefaultStatusPollInterval)
 
 	aapClient := aap.NewClient(aapURL, aapToken, aapInsecureSkipVerify)
+	fulfillmentEndpoint, fulfillmentIssuerURL := fulfillmentConfigFromEnv()
 	config := provisioning.ProviderConfig{
-		AAPClient:           aapClient,
-		ProvisionTemplate:   provisionTemplate,
-		DeprovisionTemplate: deprovisionTemplate,
-		TemplatePrefix:      templatePrefix,
+		AAPClient:            aapClient,
+		ProvisionTemplate:    provisionTemplate,
+		DeprovisionTemplate:  deprovisionTemplate,
+		TemplatePrefix:       templatePrefix,
+		FulfillmentEndpoint:  fulfillmentEndpoint,
+		FulfillmentIssuerURL: fulfillmentIssuerURL,
 	}
 
 	provider, err := provisioning.NewProvider(config)
@@ -308,6 +315,10 @@ func createAAPProvider(
 		"insecureSkipVerify", aapInsecureSkipVerify)
 
 	return provider, statusPollInterval, nil
+}
+
+func fulfillmentConfigFromEnv() (string, string) {
+	return os.Getenv(envFulfillmentEndpoint), os.Getenv(envFulfillmentIssuerURL)
 }
 
 // createAAPProviderFromEnv creates an AAP provider by reading shared env vars
@@ -380,6 +391,7 @@ func setupClusterControllers(
 			)
 			reconciler.StallThresholds = clusterOrderStallThresholdsFromEnv()
 			reconciler.Recorder = localMgr.GetEventRecorder(controller.ClusterOrderControllerName)
+			reconciler.WorkerReconciler = controller.NewBareMetalWorkerReconciler(nil, nil)
 			return reconciler.SetupWithManager(mgr)
 		},
 	)
@@ -602,10 +614,8 @@ func setupControllers(
 }
 
 // setupVolumeControllers registers the Volume resource controller and, when
-// grpcConn is set, the Volume feedback controller. The Volume controller uses
-// a VendorProvisioner interface instead of AAP; for now no real vendor is
-// configured (nil provisioner), so the controller sets Progressing and waits
-// for the vendor CSI integration in a follow-up PR.
+// grpcConn is set, the Volume feedback controller. Vendor implementations are
+// selected by the provider-keyed registry built from OSAC_VENDOR_CONTROLLERS.
 func setupVolumeControllers(mgr mcmanager.Manager, grpcConn *grpc.ClientConn) error {
 	localMgr := mgr.GetLocalManager()
 	volumeNamespace := os.Getenv(envVolumeNamespace)
@@ -620,13 +630,14 @@ func setupVolumeControllers(mgr mcmanager.Manager, grpcConn *grpc.ClientConn) er
 		}
 	}
 
-	// Construct the vendor provisioner from OSAC_VENDOR_CONTROLLERS. A missing or
+	// Construct the provider registry from OSAC_VENDOR_CONTROLLERS. A missing or
 	// invalid configuration is deliberately NOT fatal: the operator runs with
-	// volume provisioning disabled (nil provisioner) rather than crashing, so an
-	// unconfigured or misconfigured vendor backend can never take down the
-	// operator or the other controllers. Most setups (including LVMS/dev) have no
-	// vendor backend configured; their Volumes stay in Progressing until one is.
-	var provisioner controller.VendorProvisioner
+	// volume provisioning disabled (an empty registry) rather than crashing, so
+	// an unconfigured or misconfigured vendor backend can never take down the
+	// operator or the other controllers. Most setups (including LVMS/dev) have
+	// no vendor backend configured; their Volumes stay in Progressing until one
+	// is.
+	var provisioners controller.VendorProvisionerRegistry
 	endpoints, err := parseVendorControllers(os.Getenv(envVendorControllers))
 	switch {
 	case err != nil:
@@ -640,32 +651,67 @@ func setupVolumeControllers(mgr mcmanager.Manager, grpcConn *grpc.ClientConn) er
 		if configNamespace == "" {
 			configNamespace = defaultStorageConfigNamespace
 		}
-		p, perr := controller.NewVastVendorProvisioner(
-			localMgr.GetAPIReader(),
-			configNamespace,
-			endpoints,
+		var perr error
+		provisioners, perr = newVendorProvisionerRegistry(
+			localMgr.GetAPIReader(), configNamespace, endpoints,
 		)
 		if perr != nil {
-			setupLog.Error(perr, "vendor provisioner init failed; volume provisioning disabled")
-		} else {
-			provisioner = p
+			setupLog.Error(perr, "vendor provisioner registry init failed; volume provisioning disabled")
 		}
 	}
 
 	if err := controller.NewVolumeReconciler(
 		mgr,
 		volumeNamespace,
-		provisioner,
+		provisioners,
 	).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("volume controller: %w", err)
 	}
 	return nil
 }
 
-// parseVendorControllers parses a comma-separated list of backend=endpoint pairs
+// newVendorProvisionerRegistry constructs the provider implementations known
+// to this operator. Every configured endpoint key is seeded as a nil entry so
+// that Lookup returns ProviderNotImplementedError for unsupported providers
+// instead of treating the registry as empty (which leaves volumes stuck in
+// Progressing). Supported providers then overwrite their nil entry with a real
+// provisioner.
+func newVendorProvisionerRegistry(
+	reader client.Reader,
+	configNamespace string,
+	endpoints map[string]string,
+) (controller.VendorProvisionerRegistry, error) {
+	registry := make(controller.VendorProvisionerRegistry)
+
+	// Seed every configured provider as a nil entry so that Lookup returns
+	// ProviderNotImplementedError for unsupported providers instead of
+	// silently treating the registry as empty (→ VolumePhaseFailed, not
+	// Progressing).
+	for key := range endpoints {
+		registry[key] = nil
+	}
+
+	vastEndpoint, ok := endpoints["vast"]
+	if !ok {
+		return registry, nil
+	}
+
+	provisioner, err := controller.NewVastVendorProvisioner(
+		reader,
+		configNamespace,
+		map[string]string{"vast": vastEndpoint},
+	)
+	if err != nil {
+		return nil, err
+	}
+	registry["vast"] = provisioner
+	return registry, nil
+}
+
+// parseVendorControllers parses a comma-separated list of provider=endpoint pairs
 // (e.g. "vast=vast-csi-controller.osac-csi-backends.svc:50051") into a map from
-// StorageBackend name to vendor CSI controller gRPC endpoint. An empty input
-// yields an empty map, which the provisioner rejects at startup.
+// provider name to vendor CSI controller gRPC endpoint. An empty input
+// yields an empty map, which leaves volume provisioning disabled.
 func parseVendorControllers(s string) (map[string]string, error) {
 	result := make(map[string]string)
 	if s == "" {

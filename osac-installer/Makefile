@@ -28,6 +28,7 @@ SHELL := /usr/bin/env bash -o pipefail
 
 # Extra helm --set/--set-string args appended to install commands.
 EXTRA_HELM_ARGS ?=
+FULFILLMENT_GINKGO_ARGS ?=
 
 # -- Fail-fast parameter validation ------------------------------------
 # Guards fire at parse time, gated by MAKECMDGOALS so `make help` works.
@@ -92,8 +93,9 @@ INSTANCE_VALUES := values/$(PROFILE)/instance.yaml
 endif
 
 # Kind cluster create/delete routing. dev-full needs a rootful runtime (KubeVirt
-# chowns /dev/kvm), so it goes through the cross-platform wrapper; plain dev uses
-# bare kind (unchanged integration-test path).
+# chowns /dev/kvm), so it goes through the cross-platform wrapper. Apple Silicon
+# also uses the wrapper for both Kind profiles, keeping image build/load and Kind
+# provider selection aligned.
 KIND_RUNTIME := scripts/dev-full/kind-runtime.sh
 KIND_ARM64_CLI_IMAGE := quay.io/openshift/origin-cli:4.20.0
 
@@ -102,9 +104,25 @@ KIND_ARM64_CLI_IMAGE := quay.io/openshift/origin-cli:4.20.0
 # using the shared cliImage value without platform-specific values files.
 HOST_IS_MAC_ARM := $(shell if [ "$$(uname -s)" = "Darwin" ] && { [ "$$(uname -m)" = "arm64" ] || [ "$$(sysctl -in hw.optional.arm64 2>/dev/null)" = "1" ]; }; then echo true; fi)
 KIND_ARM64_CLI_IMAGE_SCRIPT := scripts/dev-full/build-arm64-cli-image.sh
+# Apple Silicon and dev-full use the runtime wrapper. Plain non-macOS dev
+# keeps its existing direct Kind/container-tool behavior.
+KIND_RUNTIME_REQUIRED := $(if $(filter true,$(HOST_IS_MAC_ARM)),true,$(if $(filter dev-full,$(PROFILE)),true,false))
 
 # Container tool and Kind cluster config.
 CONTAINER_TOOL ?= $(or $(shell command -v podman 2>/dev/null),$(shell command -v docker 2>/dev/null),$(error neither podman nor docker found in PATH))
+# On Apple Silicon, honor an explicitly selected container tool when the Kind
+# provider has not been set separately. This keeps an existing Docker- or
+# Podman-backed cluster on the same runtime for all installer operations.
+KIND_RUNTIME_PROVIDER := $(strip $(KIND_EXPERIMENTAL_PROVIDER))
+ifeq ($(HOST_IS_MAC_ARM),true)
+ifeq ($(KIND_RUNTIME_PROVIDER),)
+ifneq ($(filter command line environment,$(origin CONTAINER_TOOL)),)
+KIND_RUNTIME_PROVIDER := $(notdir $(CONTAINER_TOOL))
+endif
+endif
+endif
+KIND_RUNTIME_ENV := $(if $(KIND_RUNTIME_PROVIDER),KIND_EXPERIMENTAL_PROVIDER=$(KIND_RUNTIME_PROVIDER))
+KIND_RUNTIME_CMD := $(KIND_RUNTIME_ENV) $(KIND_RUNTIME)
 KIND_CLUSTER_NAME ?= osac-dev
 KIND_CONFIG := kind-config.yaml
 # dev-full runs its cluster in a separate (rootful) podman daemon; give it a
@@ -121,13 +139,26 @@ endif
 export KUBECONFIG := $(or $(KUBECONFIG),$(KIND_KUBECONFIG))
 
 define kind-load-image
-	@if [ "$$(basename $(CONTAINER_TOOL))" = "podman" ]; then \
+	@if [ "$(KIND_RUNTIME_REQUIRED)" = "true" ]; then \
 		tmpfile=$$(mktemp /tmp/kind-image-XXXXXX.tar); \
+		trap 'rm -f "$$tmpfile"' EXIT; \
+		$(KIND_RUNTIME_CMD) container save $(1) -o "$$tmpfile"; \
+		$(KIND_RUNTIME_CMD) load image-archive "$$tmpfile" --name $(KIND_CLUSTER_NAME); \
+	elif [ "$$(basename $(CONTAINER_TOOL))" = "podman" ]; then \
+		tmpfile=$$(mktemp /tmp/kind-image-XXXXXX.tar); \
+		trap 'rm -f "$$tmpfile"' EXIT; \
 		$(CONTAINER_TOOL) save $(1) -o "$$tmpfile"; \
 		kind load image-archive "$$tmpfile" --name $(KIND_CLUSTER_NAME); \
-		rm -f "$$tmpfile"; \
 	else \
 		kind load docker-image $(1) --name $(KIND_CLUSTER_NAME); \
+	fi
+endef
+
+define kind-container-build
+	@if [ "$(KIND_RUNTIME_REQUIRED)" = "true" ]; then \
+		$(KIND_RUNTIME_CMD) container build $(1); \
+	else \
+		$(CONTAINER_TOOL) build $(1); \
 	fi
 endef
 
@@ -142,12 +173,12 @@ help: ## Display this help
 .PHONY: install-infra
 install-infra: ## Install infrastructure (PLATFORM= PROFILE= NS= required)
 ifeq ($(PLATFORM),kind)
-ifeq ($(PROFILE),dev-full)
-	@$(KIND_RUNTIME) check
-	@$(KIND_RUNTIME) create-cluster $(KIND_CLUSTER_NAME) $(KIND_CONFIG) $(KIND_KUBECONFIG)
 ifeq ($(HOST_IS_MAC_ARM),true)
-	@$(KIND_ARM64_CLI_IMAGE_SCRIPT) $(KIND_CLUSTER_NAME) $(KIND_ARM64_CLI_IMAGE)
-endif
+	@$(KIND_RUNTIME_CMD) check
+	@$(KIND_RUNTIME_CMD) create-cluster $(KIND_CLUSTER_NAME) $(KIND_CONFIG) $(KIND_KUBECONFIG)
+else ifeq ($(PROFILE),dev-full)
+	@$(KIND_RUNTIME_CMD) check
+	@$(KIND_RUNTIME_CMD) create-cluster $(KIND_CLUSTER_NAME) $(KIND_CONFIG) $(KIND_KUBECONFIG)
 else
 	@if kind get clusters | grep -q "^$(KIND_CLUSTER_NAME)$$"; then \
 		echo "Kind cluster '$(KIND_CLUSTER_NAME)' already exists"; \
@@ -156,6 +187,9 @@ else
 		kind create cluster --name $(KIND_CLUSTER_NAME) --config $(KIND_CONFIG) --wait 60s; \
 	fi
 	@kind export kubeconfig --name $(KIND_CLUSTER_NAME) --kubeconfig $(KIND_KUBECONFIG)
+endif
+ifeq ($(HOST_IS_MAC_ARM),true)
+	@$(KIND_RUNTIME_ENV) $(KIND_ARM64_CLI_IMAGE_SCRIPT) $(KIND_CLUSTER_NAME) $(KIND_ARM64_CLI_IMAGE)
 endif
 	helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
 		--version v1.20.0 --namespace cert-manager --create-namespace \
@@ -173,7 +207,8 @@ endif
 		--namespace osac-infra --create-namespace \
 		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
 		--set osacNamespace=$(NS) \
-		--wait-for-jobs --timeout 30m
+		--wait-for-jobs --timeout 30m \
+	|| { echo "=== osac-infra hook jobs ==="; kubectl get jobs,pods,cm -n osac-infra || true; kubectl logs -n osac-infra -l job-name=osac-infra-apply-ca-bundle --tail=200 || true; kubectl get deploy,endpoints,certificate -n cert-manager || true; exit 1; }
 	@for f in ../osac-operator/config/crd/fakes/*.yaml; do \
 		case "$$(basename "$$f")" in \
 			*osac.openshift.io*) continue ;; \
@@ -201,14 +236,18 @@ else
 		--set lvms.channel=stable-$(OCP_VERSION) \
 		--set keycloak.hostname=https://keycloak-keycloak.$(DOMAIN) \
 		--set keycloak.route.hostname=keycloak-keycloak.$(DOMAIN) \
-		--timeout 30m --wait-for-jobs
+		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DOMAIN)/realms/osac" \
+		--timeout 30m --wait-for-jobs \
+	|| { echo "=== osac-infra hook jobs ==="; oc get jobs,pods,cm -n osac-infra || true; oc logs -n osac-infra -l job-name=osac-infra-apply-ca-bundle --tail=200 || true; oc get deploy,endpoints,certificate -n cert-manager || true; exit 1; }
 endif
 
 .PHONY: uninstall-infra
 uninstall-infra: ## Uninstall infrastructure (PLATFORM= PROFILE= NS= required)
 ifeq ($(PLATFORM),kind)
-ifeq ($(PROFILE),dev-full)
-	@$(KIND_RUNTIME) delete-cluster $(KIND_CLUSTER_NAME)
+ifeq ($(HOST_IS_MAC_ARM),true)
+	@$(KIND_RUNTIME_CMD) delete-cluster $(KIND_CLUSTER_NAME)
+else ifeq ($(PROFILE),dev-full)
+	@$(KIND_RUNTIME_CMD) delete-cluster $(KIND_CLUSTER_NAME)
 else
 	helm uninstall osac-infra --namespace osac-infra --ignore-not-found
 	helm uninstall strimzi-cluster-operator --namespace osac-kafka --ignore-not-found
@@ -246,6 +285,7 @@ endif
 	helm upgrade --install osac $(OSAC_CHART) \
 		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
 		--namespace $(NS) --create-namespace \
+		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(DOMAIN),--set service.externalHostname=fulfillment-api-$(NS).$(DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DOMAIN) --set global.clusterDomain=$(DOMAIN)) \
 		$(EXTRA_HELM_ARGS) \
 		--wait --timeout 40m
@@ -262,7 +302,7 @@ ifneq ($(PLATFORM)/$(PROFILE),kind/dev-full)
 	@echo "ERROR: install-devstack requires PLATFORM=kind PROFILE=dev-full" >&2; exit 1
 endif
 	# Pre-install: node-level CNI setup (requires host container runtime access)
-	scripts/dev-full/install-virt-node-setup.sh $(KIND_CLUSTER_NAME)
+	$(KIND_RUNTIME_ENV) scripts/dev-full/install-virt-node-setup.sh $(KIND_CLUSTER_NAME)
 	# Helm install: operators + AWX + UI + seeding
 	helm upgrade --install osac-devstack charts/osac-devstack \
 		--namespace $(NS) --create-namespace \
@@ -292,22 +332,25 @@ ifeq ($(SUITE),all)
 	$(MAKE) test SUITE=bmf
 endif
 ifeq ($(SUITE),fulfillment)
-	$(CONTAINER_TOOL) build -t localhost/fulfillment-service:it -f ../fulfillment-service/Containerfile ..
+	$(call kind-container-build,-t localhost/fulfillment-service:it -f ../fulfillment-service/Containerfile ..)
 	$(call kind-load-image,localhost/fulfillment-service:it)
 	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
 		EXTRA_HELM_ARGS="--set service.images.service=localhost/fulfillment-service:it --set operator.enabled=false --set networkClass.enabled=false"
-	@for f in ../fulfillment-service/it/crds/*.yaml; do kubectl apply --server-side --force-conflicts -f "$$f"; done
-	cd ../fulfillment-service && ginkgo run --timeout 1h -v it
+	@for f in ../fulfillment-service/it/crds/*.yaml; do kubectl apply --server-side --field-manager=helm --force-conflicts -f "$$f"; done
+	cd ../fulfillment-service && ginkgo run --timeout 1h -v $(FULFILLMENT_GINKGO_ARGS) it
+	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
+		EXTRA_HELM_ARGS="--set service.images.service=localhost/fulfillment-service:it --set global.services.bmaas.enabled=false --set operator.enabled=false --set networkClass.enabled=false"
+	cd ../fulfillment-service && IT_TEST_SUITE=bmaas-disabled ginkgo run --timeout 1h -v --focus 'Service enablement' it
 endif
 ifeq ($(SUITE),operator)
-	$(CONTAINER_TOOL) build -t localhost/osac-operator:it -f ../osac-operator/Containerfile ..
+	$(call kind-container-build,-t localhost/osac-operator:it -f ../osac-operator/Containerfile ..)
 	$(call kind-load-image,localhost/osac-operator:it)
 	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \
 		EXTRA_HELM_ARGS="--set operator.image.repository=localhost/osac-operator --set operator.image.tag=it --set operator.image.pullPolicy=Never --set service.enabled=false --set hubAccess.enabled=false --set validation.enabled=false --set networkClass.enabled=false"
 	cd ../osac-operator && ginkgo run --timeout 30m -v test/integration
 endif
 ifeq ($(SUITE),bmf)
-	$(CONTAINER_TOOL) build -t localhost/bmf-operator:it -f ../bare-metal-fulfillment-operator/Containerfile ..
+	$(call kind-container-build,-t localhost/bmf-operator:it -f ../bare-metal-fulfillment-operator/Containerfile ..)
 	$(call kind-load-image,localhost/bmf-operator:it)
 	kubectl apply --server-side --force-conflicts -f ../bare-metal-fulfillment-operator/test/crds/
 	$(MAKE) install-osac PLATFORM=$(PLATFORM) PROFILE=$(PROFILE) NS=$(NS) \

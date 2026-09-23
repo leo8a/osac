@@ -34,6 +34,7 @@ type VolumeInfo struct {
 // fulfillment service.
 type CreateVolumeParams struct {
 	Tenant     string
+	Project    string
 	Tier       string
 	SizeBytes  int64
 	AccessMode string
@@ -41,9 +42,13 @@ type CreateVolumeParams struct {
 	PVCRef     string
 }
 
-// ListVolumesParams are the filter parameters for listing volumes.
+// ListVolumesParams are the filter parameters for listing volumes. Non-nil
+// tenant and project filters select their scopes explicitly, including the
+// tenant default project represented by an empty project string.
 type ListVolumesParams struct {
-	NameFilter string
+	NameFilter    string
+	TenantFilter  *string
+	ProjectFilter *string
 }
 
 // VolumeClient is the interface for managing volumes through the OSAC

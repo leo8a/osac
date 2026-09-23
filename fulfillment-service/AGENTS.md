@@ -23,8 +23,8 @@ respective areas.
 
 ## Invariants
 
-- `proto/private/` is the API source of truth for service definitions; `proto/tests/` contains editable test-only definitions.
-- Never edit `proto/public/` or `internal/api/` manually; `proto/tests/` is editable test-proto source.
+- The proto contract lives in the top-level `proto/` module, not here. `proto/private/` is the API source of truth; `proto/tests/` contains editable test-only definitions.
+- Never edit `proto/public/` or `proto/gen/` manually; `proto/tests/` is editable test-proto source. Generated Go is one shared tree at `proto/gen/`, imported by every module as `github.com/osac-project/osac/proto/gen/...`.
 - Express field and cross-field validation with proto validation annotations when possible, not duplicated Go checks.
 - Base resource messages follow the custom `OSAC_OBJECT_SHAPE` rule. An intentional exception requires `// buf:lint:ignore OSAC_OBJECT_SHAPE` directly above the message.
 - Update validation operates on the stored object after applying the update mask, not on the partial request alone.
@@ -34,28 +34,47 @@ respective areas.
 
 ## Generated files
 
-- Changes under `proto/private/` require `uv run dev.py build protos`, `uv run dev.py lint proto`, and `buf generate`.
-- Commit the private source, generated public proto, and generated Go code for `proto/private/` changes.
-- Run generation in each affected consumer: `osac-operator/`, `osac-metering/metering-service/`, and, for volume/storage protos, `osac-csi-driver/`.
-- Test-only proto changes under `proto/tests/` require `uv run dev.py lint proto && buf generate`; commit the test proto source and generated Go code, but do not generate public protos.
-- `uv run dev.py build protos` generates public protos; `buf generate` generates Go API code. Do not assume the first command performs both.
-- Run `go generate ./...` for mocks and other `go:generate` outputs; run `go mod tidy` after module changes.
-- Never hand-edit `proto/public/`, `internal/api/`, `*_mock.go`, or `go.sum`.
+- Proto changes are regenerated ONCE, in the top-level `proto/` module: `make -C ../proto generate` (= `uv run dev.py build protos` for `proto/public/` + `buf generate` for `proto/gen/`). `make -C ../proto lint` runs `buf lint`. No more per-consumer `buf generate`.
+- Commit the `proto/private/` (or `proto/tests/`) source, the regenerated `proto/public/`, and the regenerated `proto/gen/`. CI (`Check generated code (proto)`) fails the PR if `proto/gen/` or `proto/public/` is stale.
+- Test-only proto changes under `proto/tests/` still regenerate `proto/gen/` but not `proto/public/`.
+- Run `go generate ./...` here for mocks and other `go:generate` outputs; run `go mod tidy` after module changes.
+- Never hand-edit `proto/public/`, `proto/gen/`, `*_mock.go`, or `go.sum`.
 
 ## Validation
 
-From `fulfillment-service/`:
+Run these checks from `fulfillment-service/` as applicable.
+
+### Local checks
 
 ```bash
-uv run dev.py lint                 # Go/proto lint
-uv run ruff check                  # Python lint
+uv run dev.py lint
+uv run ruff check
 helm lint charts/service -f charts/service/ci-values.yaml
 helm template test charts/service -f charts/service/ci-values.yaml
 go build ./cmd/fulfillment-service ./cmd/osac
-ginkgo run -r internal             # Unit tests; excludes it/
-ginkgo run internal/servers        # Focused package tests
+ginkgo run -r internal
 ```
 
-For integration tests, use the installer-owned target with an available Kind
-cluster: `make -C ../osac-installer test PLATFORM=kind PROFILE=dev NS=osac SUITE=fulfillment`.
-See `README.md` for required host entries and deployment setup.
+`ginkgo run -r internal` runs the unit suites without `it/`. For a focused
+server run, use `ginkgo run internal/servers`.
+
+### Integration tests
+
+The installer test target builds, loads, and deploys the current service image.
+It reuses the existing cluster and database. For a full suite run, use a fresh
+environment unless the user agrees to reuse the database. See `README.md` for
+prerequisites and host entries.
+
+To prepare a fresh environment, recreate the dedicated `osac-dev` Kind
+cluster. Collect useful diagnostics before deleting it.
+
+```bash
+kind delete cluster --name osac-dev
+make -C ../osac-installer install-infra PLATFORM=kind PROFILE=dev NS=osac
+```
+
+Then run the suite:
+
+```bash
+make -C ../osac-installer test PLATFORM=kind PROFILE=dev NS=osac SUITE=fulfillment
+```

@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/osac-project/osac-operator
-  tag: latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+  tag: latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
   pullPolicy: Always
 
 replicaCount: 1
@@ -8,10 +8,10 @@ replicaCount: 1
 resources:
   limits:
     cpu: 500m
-    memory: 128Mi
+    memory: 512Mi
   requests:
     cpu: 10m
-    memory: 64Mi
+    memory: 128Mi
 
 aap:
   url: ""
@@ -29,6 +29,9 @@ stall:
 fulfillment:
   serverAddress: ""
   tokenFile: ""
+  configMap:
+    name: ""
+    optional: true
 
 controllers:
   tenant: true
@@ -41,7 +44,7 @@ controllers:
   volume: true
   networkingProvisioning: true
 
-# vendorControllers maps StorageBackend names to their vendor CSI controller
+# vendorControllers maps provider identifiers to their vendor CSI controller
 # gRPC endpoints, rendered into OSAC_VENDOR_CONTROLLERS for the Volume
 # controller. Optional: leave empty on setups with no vendor storage backend
 # (e.g. LVMS/dev) — provisioning is disabled until a backend is configured.

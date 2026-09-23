@@ -199,6 +199,8 @@ allow if {
 allow if {
   has_client_permissions
   grpc_method in {
+    "/osac.public.v1.AddOnOperators/Get",
+    "/osac.public.v1.AddOnOperators/List",
     "/osac.public.v1.BareMetalInstanceCatalogItems/Get",
     "/osac.public.v1.BareMetalInstanceCatalogItems/List",
     "/osac.public.v1.BareMetalInstanceTemplates/Get",
@@ -284,6 +286,11 @@ allow if {
     "/osac.public.v1.Secrets/Get",
     "/osac.public.v1.Secrets/List",
     "/osac.public.v1.Secrets/Update",
+    "/osac.public.v1.Volumes/Create",
+    "/osac.public.v1.Volumes/Delete",
+    "/osac.public.v1.Volumes/Get",
+    "/osac.public.v1.Volumes/List",
+    "/osac.public.v1.Volumes/Update",
   }
 }
 

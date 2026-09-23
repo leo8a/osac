@@ -40,9 +40,6 @@ import (
 	"k8s.io/klog/v2"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	_ "github.com/osac-project/osac/fulfillment-service/internal/api/cleanapi"
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth/jwe"
 	"github.com/osac-project/osac/fulfillment-service/internal/console"
@@ -54,12 +51,14 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/network"
 	"github.com/osac-project/osac/fulfillment-service/internal/provisioners"
 	"github.com/osac-project/osac/fulfillment-service/internal/recovery"
-	"github.com/osac-project/osac/fulfillment-service/internal/references"
 	"github.com/osac-project/osac/fulfillment-service/internal/servers"
 	"github.com/osac-project/osac/fulfillment-service/internal/services"
 	shtdwn "github.com/osac-project/osac/fulfillment-service/internal/shutdown"
 	"github.com/osac-project/osac/fulfillment-service/internal/validation"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
+	_ "github.com/osac-project/osac/proto/gen/cleanapi"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 // userIDResolver implements auth.UserIDResolver by querying the users DAO.
@@ -452,19 +451,9 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 
 	// Prepare the reference validation interceptor:
 	c.logger.InfoContext(ctx, "Creating reference validation interceptor")
-	referenceValidator, err := references.NewReferenceValidator().
-		SetLogger(c.logger).
-		SetMetricsRegisterer(metricsRegisterer).
-		Build()
+	referenceValidator, err := newReferenceValidator(c.logger, tenancyLogic, metricsRegisterer)
 	if err != nil {
-		return fmt.Errorf("failed to create reference validation interceptor: %w", err)
-	}
-
-	// Register reference lookup functions for all resource types:
-	c.logger.InfoContext(ctx, "Registering reference lookup functions")
-	err = registerReferenceLookups(referenceValidator, c.logger, tenancyLogic, metricsRegisterer)
-	if err != nil {
-		return fmt.Errorf("failed to register reference lookups: %w", err)
+		return err
 	}
 
 	// Prepare the transactions manager:
@@ -512,13 +501,14 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 		return fmt.Errorf("failed to read gRPC keepalive configuration: %w", err)
 	}
 
-	// Create the disabled-service request counter and unknown service handler:
-	disabledServiceCounter := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "fulfillment_disabled_service_requests_total",
-		Help: "Total requests to disabled services.",
-	}, []string{"service"})
-	metricsRegisterer.MustRegister(disabledServiceCounter)
-	unknownHandler := NewUnknownServiceHandler(c.args.services, disabledServiceCounter)
+	// Create the disabled-service request counter and handler:
+	disabledServiceHandler, err := NewDisabledServiceHandler().
+		SetDisabledServices(buildDisabledServiceMap(c.args.services)).
+		SetMetricsRegisterer(metricsRegisterer).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create disabled-service handler: %w", err)
+	}
 
 	// Create the gRPC server:
 	c.logger.InfoContext(ctx, "Creating gRPC server")
@@ -531,7 +521,7 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 			MinTime:             keepaliveConfig.MinTime,
 			PermitWithoutStream: true,
 		}),
-		grpc.UnknownServiceHandler(unknownHandler),
+		grpc.InTapHandle(disabledServiceHandler),
 		grpc.ChainUnaryInterceptor(
 			panicInterceptor.UnaryServer,
 			metricsInterceptor.UnaryServer,
@@ -593,6 +583,7 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 	c.logger.InfoContext(ctx, "Creating capabilities servers")
 	capabilitiesServer, err := servers.NewCapabilitiesServer().
 		SetLogger(c.logger).
+		SetServiceFlags(c.args.services).
 		AddAutnTrustedTokenIssuers(c.args.trustedTokenIssuers...).
 		Build()
 	if err != nil {
@@ -602,6 +593,7 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 	publicv1.RegisterCapabilitiesServer(grpcServer, capabilitiesServer)
 	privateCapabilitiesServer, err := servers.NewPrivateCapabilitiesServer().
 		SetLogger(c.logger).
+		SetServiceFlags(c.args.services).
 		AddAuthnTrustedTokenIssuers(c.args.trustedTokenIssuers...).
 		Build()
 	if err != nil {
@@ -995,8 +987,8 @@ func newDAOTierResolver(
 		selected := backends[0]
 		backendID := selected.GetBackendId()
 
-		// Volume.status.backend (and osac.backend downstream) identifies the
-		// vendor CSI routing target, not this specific StorageBackend row, so
+		// Volume.status.provider (and the CSI vendor routing context downstream)
+		// identifies the vendor routing target, not this specific StorageBackend row, so
 		// it must carry the backend's provider (e.g. "vast") rather than its
 		// server-generated id -- osac-csi-driver's --vendor-controllers and
 		// --vendor-sockets maps are keyed by provider, set once in the Helm
@@ -1011,7 +1003,7 @@ func newDAOTierResolver(
 		}
 
 		return &servers.TierResolution{
-			Backend:  backend.GetSpec().GetProvider(),
+			Provider: backend.GetSpec().GetProvider(),
 			Protocol: tier.GetSpec().GetProtocol(),
 		}, nil
 	}

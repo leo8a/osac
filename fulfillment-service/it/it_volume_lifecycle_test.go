@@ -24,10 +24,11 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/annotations"
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/labels"
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 	osacv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("Volume lifecycle", func() {
@@ -128,6 +129,25 @@ var _ = Describe("Volume lifecycle", func() {
 	// =========================================================================
 
 	It("should create and delete a Volume end-to-end", func() {
+		projectsClient := privatev1.NewProjectsClient(tool.InternalView().AdminConn())
+		project := fmt.Sprintf("test-volume-project-%s", uuid.New()[24:32])
+		projectResp, err := projectsClient.Create(ctx,
+			privatev1.ProjectsCreateRequest_builder{
+				Object: privatev1.Project_builder{
+					Metadata: privatev1.Metadata_builder{
+						Name:   project,
+						Tenant: testTenant,
+					}.Build(),
+					Spec: privatev1.ProjectSpec_builder{
+						Title: "Volume integration project",
+					}.Build(),
+				}.Build(),
+			}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		DeferCleanup(func() {
+			deleteProject(ctx, projectsClient, projectResp.GetObject().GetId())
+		})
+
 		volName := fmt.Sprintf("test-vol-%s", uuid.New()[24:32])
 
 		// 1. CREATE volume (admin conn + explicit tenant)
@@ -135,8 +155,9 @@ var _ = Describe("Volume lifecycle", func() {
 			privatev1.VolumesCreateRequest_builder{
 				Object: privatev1.Volume_builder{
 					Metadata: privatev1.Metadata_builder{
-						Name:   volName,
-						Tenant: testTenant,
+						Name:    volName,
+						Tenant:  testTenant,
+						Project: project,
 					}.Build(),
 					Spec: privatev1.VolumeSpec_builder{
 						StorageTier: tierName,
@@ -164,8 +185,10 @@ var _ = Describe("Volume lifecycle", func() {
 		Expect(err).ToNot(HaveOccurred())
 		vol := getResp.GetObject()
 		Expect(vol.GetStatus().GetState()).To(Equal(privatev1.VolumeState_VOLUME_STATE_CREATING))
-		Expect(vol.GetStatus().GetBackend()).To(Equal("test-provider"))
+		Expect(vol.GetStatus().GetProvider()).To(Equal("test-provider"))
+		Expect(vol.GetStatus().ProtoReflect().Descriptor().Fields().ByName("backend")).To(BeNil())
 		Expect(vol.GetStatus().GetProtocol()).To(Equal(privatev1.StorageProtocol_STORAGE_PROTOCOL_BLOCK))
+		Expect(vol.GetMetadata().GetProject()).To(Equal(project))
 
 		// 2b. VERIFY hub is assigned asynchronously by the reconciler (selectHub → SetHub).
 		Eventually(func(g Gomega) {
@@ -193,6 +216,8 @@ var _ = Describe("Volume lifecycle", func() {
 			g.Expect(cr.Spec.StorageTier).To(Equal(tierName))
 			g.Expect(cr.Spec.SizeGiB).To(Equal(int64(10)))
 			g.Expect(string(cr.Spec.AccessMode)).To(ContainSubstring("ReadWriteOnce"))
+			g.Expect(cr.GetAnnotations()).To(HaveKeyWithValue(annotations.Tenant, testTenant))
+			g.Expect(cr.GetAnnotations()).To(HaveKeyWithValue(annotations.Project, project))
 		}, time.Minute, time.Second).Should(Succeed())
 
 		// 4. FEEDBACK — simulate controller updating status to AVAILABLE
@@ -365,7 +390,7 @@ var _ = Describe("Volume lifecycle", func() {
 			vol2Get, err := volumesClient.Get(ctx,
 				privatev1.VolumesGetRequest_builder{Id: vol2Id}.Build())
 			Expect(err).ToNot(HaveOccurred())
-			Expect(vol2Get.GetObject().GetStatus().GetBackend()).To(Equal("test-provider-nfs"))
+			Expect(vol2Get.GetObject().GetStatus().GetProvider()).To(Equal("test-provider-nfs"))
 			Expect(vol2Get.GetObject().GetStatus().GetProtocol()).To(Equal(privatev1.StorageProtocol_STORAGE_PROTOCOL_NFS))
 
 			// Create volume with original BLOCK tier → should resolve to original backend
@@ -396,7 +421,7 @@ var _ = Describe("Volume lifecycle", func() {
 			vol1Get, err := volumesClient.Get(ctx,
 				privatev1.VolumesGetRequest_builder{Id: vol1Id}.Build())
 			Expect(err).ToNot(HaveOccurred())
-			Expect(vol1Get.GetObject().GetStatus().GetBackend()).To(Equal("test-provider"))
+			Expect(vol1Get.GetObject().GetStatus().GetProvider()).To(Equal("test-provider"))
 			Expect(vol1Get.GetObject().GetStatus().GetProtocol()).To(Equal(privatev1.StorageProtocol_STORAGE_PROTOCOL_BLOCK))
 		})
 	})

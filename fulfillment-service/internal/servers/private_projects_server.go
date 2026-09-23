@@ -24,10 +24,10 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 // PrivateProjectsServerBuilder contains the data and logic needed to create a private projects server.
@@ -180,9 +180,7 @@ func (s *PrivateProjectsServer) Create(ctx context.Context,
 		return
 	}
 
-	// When a project is created, the 'metadata.name' field must be the full name of the project, and the
-	// 'metadata.project' field must be the name of the parent project. If the parent project is not specified
-	// then it will be calculated from the the name, removing the last component.
+	// metadata.project must remain empty to derive the parent project from the path
 	var project string
 	if count > 1 {
 		project = strings.Join(path[:count-1], ".")

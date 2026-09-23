@@ -31,8 +31,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/collections"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
@@ -40,7 +40,14 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/masks"
 	"github.com/osac-project/osac/fulfillment-service/internal/util"
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
+
+// PrepareCandidateFunc may modify the proposed object (candidate) before it is returned or saved.
+// On Create, current is nil. On Update, current is a copy of the stored object before the request
+// changes, and candidate is a separate copy containing those changes. Returning an error rejects
+// the operation without changing the request or stored object.
+type PrepareCandidateFunc[O dao.Object] func(ctx context.Context, current, candidate O) error
 
 // GenericServerBuilder contains the data and logic needed to create new generic servers.
 type GenericServerBuilder[O dao.Object] struct {
@@ -274,7 +281,7 @@ func (b *GenericServerBuilder[O]) Build() (result *GenericServer[O], err error) 
 		return
 	}
 
-	// Prepare the template for the object:
+	// Keep an empty object to clone when a Create request omits one:
 	var object O
 	reflect := object.ProtoReflect()
 	s.template = reflect.New().Interface()
@@ -288,8 +295,7 @@ func (b *GenericServerBuilder[O]) Build() (result *GenericServer[O], err error) 
 		return
 	}
 
-	// Prepare templates for the request and response types. These are empty messages that will be cloned when
-	// it is necessary to create new instances.
+	// Find the request and response types for each method. Responses are cloned when needed.
 	s.listRequest, s.listResponse, err = b.findRequestAndResponse(service, listMethod)
 	if err != nil {
 		return
@@ -513,24 +519,58 @@ func isSingletonConstraintViolation(constraintName string) bool {
 }
 
 func (s *GenericServer[O]) Create(ctx context.Context, request any, response any) error {
-	// Route dry-run requests to skip persistence and event emission. Resource-specific
-	// validation (template resolution, catalog item field definitions, spec defaults)
-	// runs in the calling server before reaching GenericServer. The dry-run flag is
-	// carried as gRPC metadata (HTTP header X-Dry-Run: true) rather than a proto field
-	// to keep request messages purely declarative.
-	if isDryRun(ctx) {
-		return s.createDryRun(ctx, request, response)
-	}
+	return s.CreateWithCandidatePreparation(ctx, request, response, nil)
+}
 
+// CreateWithCandidatePreparation copies the requested object and assigns its creator and tenant.
+// If provided, prepareCandidate may modify that copy before its final validation. A successful
+// request saves the result; a dry run returns it without saving.
+func (s *GenericServer[O]) CreateWithCandidatePreparation(
+	ctx context.Context,
+	request any,
+	response any,
+	prepareCandidate PrepareCandidateFunc[O],
+) error {
 	requestObject, err := s.prepareForCreate(ctx, request)
 	if err != nil {
 		return err
 	}
 
-	// Save the object:
-	daoResponse, err := s.dao.Create().
-		SetObject(requestObject).
-		Do(ctx)
+	var nilObject O
+	if prepareCandidate != nil {
+		preparedID := requestObject.GetId()
+		preparedMetadata := proto.Clone(s.getMetadata(requestObject)).(metadataIface)
+		if err = prepareCandidate(ctx, nilObject, requestObject); err != nil {
+			return err
+		}
+		if err = s.validatePreparedCandidate(ctx, requestObject, preparedID, preparedMetadata); err != nil {
+			return err
+		}
+	}
+
+	return s.createPrepared(ctx, requestObject, response)
+}
+
+func (s *GenericServer[O]) createPrepared(ctx context.Context, requestObject O, response any) error {
+	if s.isNil(requestObject) {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "object is mandatory")
+	}
+
+	// In dry-run mode, return the validated candidate in a fresh create response.
+	// The response includes defaults and resolved references produced during
+	// preparation. Database writes and creation events are skipped; validation may
+	// still perform database reads.
+	if isDryRun(ctx) {
+		type responseIface interface {
+			SetObject(O)
+		}
+		responseMsg := proto.Clone(s.createResponse).(responseIface)
+		responseMsg.SetObject(requestObject)
+		s.setPointer(response, responseMsg)
+		return nil
+	}
+
+	daoResponse, err := s.dao.Create().SetObject(requestObject).Do(ctx)
 	if err != nil {
 		var alreadyExistsErr *dao.ErrAlreadyExists
 		if errors.As(err, &alreadyExistsErr) {
@@ -561,23 +601,17 @@ func (s *GenericServer[O]) Create(ctx context.Context, request any, response any
 		if errors.As(err, &deadlockErr) {
 			return grpcstatus.Errorf(grpccodes.Aborted, "%s", deadlockErr.Error())
 		}
-		s.logger.ErrorContext(
-			ctx,
-			"Failed to create",
-			slog.Any("error", err),
-		)
+		s.logger.ErrorContext(ctx, "Failed to create", slog.Any("error", err))
 		return grpcstatus.Errorf(grpccodes.Internal, "failed to create object")
 	}
-	responseObject := daoResponse.GetObject()
 
 	// Create the response message:
 	type responseIface interface {
 		SetObject(O)
 	}
 	responseMsg := proto.Clone(s.createResponse).(responseIface)
-	responseMsg.SetObject(responseObject)
+	responseMsg.SetObject(daoResponse.GetObject())
 	s.setPointer(response, responseMsg)
-
 	return nil
 }
 
@@ -591,6 +625,8 @@ func (s *GenericServer[O]) prepareForCreate(ctx context.Context, request any) (O
 	requestObject := requestMsg.GetObject()
 	if s.isNil(requestObject) {
 		requestObject = proto.Clone(s.template).(O)
+	} else {
+		requestObject = proto.Clone(requestObject).(O)
 	}
 
 	requestMetadata := s.getMetadata(requestObject)
@@ -634,19 +670,26 @@ func (s *GenericServer[O]) checkAllowedTenant(tenant string) error {
 	return nil
 }
 
-func (s *GenericServer[O]) createDryRun(ctx context.Context, request any, response any) error {
-	requestObject, err := s.prepareForCreate(ctx, request)
-	if err != nil {
+// validatePreparedCandidate checks the object after preparation. The callback may change its
+// contents, but not the ID, creator, tenant, or project established before the callback. The
+// resulting metadata and object must also pass validation.
+func (s *GenericServer[O]) validatePreparedCandidate(
+	ctx context.Context, candidate O, preparedID string, preparedMetadata metadataIface,
+) error {
+	metadata := s.getMetadata(candidate)
+	if metadata == nil {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "metadata is required")
+	}
+	if candidate.GetId() != preparedID || metadata.GetTenant() != preparedMetadata.GetTenant() ||
+		metadata.GetProject() != preparedMetadata.GetProject() || metadata.GetCreator() != preparedMetadata.GetCreator() {
+		return grpcstatus.Errorf(grpccodes.PermissionDenied, "candidate preparation cannot change identity or ownership metadata")
+	}
+	if err := s.validateMetadata(ctx, metadata); err != nil {
 		return err
 	}
-
-	type responseIface interface {
-		SetObject(O)
+	if err := s.validator.Validate(candidate); err != nil {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "validation failed: %s", err)
 	}
-	responseMsg := proto.Clone(s.createResponse).(responseIface)
-	responseMsg.SetObject(requestObject)
-	s.setPointer(response, responseMsg)
-
 	return nil
 }
 
@@ -671,6 +714,19 @@ func isDryRun(ctx context.Context) bool {
 }
 
 func (s *GenericServer[O]) Update(ctx context.Context, request any, response any) error {
+	return s.UpdateWithCandidatePreparation(ctx, request, response, nil)
+}
+
+// UpdateWithCandidatePreparation builds a proposed object by applying masked fields to a copy
+// of the stored object, or copying the full request when there is no mask. If provided, the
+// callback sees a separate copy of the stored object and may modify the proposal. The result
+// is validated, then saved only if it differs from the stored object.
+func (s *GenericServer[O]) UpdateWithCandidatePreparation(
+	ctx context.Context,
+	request any,
+	response any,
+	prepareCandidate PrepareCandidateFunc[O],
+) error {
 	// Extract the object from the request message:
 	type requestIface interface {
 		GetObject() O
@@ -747,13 +803,12 @@ func (s *GenericServer[O]) Update(ctx context.Context, request any, response any
 		}
 	}
 
-	// Clone the current object so that in-place modifications (mask application, tenant calculation) don't
-	// affect the original that we use for the equivalence comparison later.
-	tmpObject := proto.Clone(currentObject).(O)
-
 	// Update the fields indicated in the update mask, or all the fields if there is no update mask:
 	requestMask := requestMsg.GetUpdateMask()
+	var tmpObject O
 	if requestMask != nil {
+		// Keep the stored object unchanged for comparison and detach any values copied from the request.
+		tmpObject = proto.Clone(currentObject).(O)
 		fieldPaths, err := s.compilePaths(requestMask.GetPaths())
 		if err != nil {
 			return err
@@ -766,8 +821,9 @@ func (s *GenericServer[O]) Update(ctx context.Context, request any, response any
 				fieldPath.Clear(tmpObject)
 			}
 		}
+		tmpObject = proto.Clone(tmpObject).(O)
 	} else {
-		tmpObject = requestObject
+		tmpObject = proto.Clone(requestObject).(O)
 	}
 
 	// Validate the merged object using protovalidate.
@@ -802,6 +858,17 @@ func (s *GenericServer[O]) Update(ctx context.Context, request any, response any
 	currentTenant := s.getMetadata(currentObject).GetTenant()
 	if assignedTenant != currentTenant {
 		if err = s.checkAllowedTenant(assignedTenant); err != nil {
+			return err
+		}
+	}
+
+	if prepareCandidate != nil {
+		preparedID := tmpObject.GetId()
+		preparedMetadata := proto.Clone(s.getMetadata(tmpObject)).(metadataIface)
+		if err = prepareCandidate(ctx, proto.Clone(currentObject).(O), tmpObject); err != nil {
+			return err
+		}
+		if err = s.validatePreparedCandidate(ctx, tmpObject, preparedID, preparedMetadata); err != nil {
 			return err
 		}
 	}
@@ -1007,10 +1074,7 @@ func (s *GenericServer[O]) Signal(ctx context.Context, request any, response any
 
 	// Send the signal event:
 	if s.notifier != nil {
-		event := privatev1.Event_builder{
-			Id:   uuid.New(),
-			Type: privatev1.EventType_EVENT_TYPE_OBJECT_SIGNALED,
-		}.Build()
+		event := newEvent(privatev1.EventType_EVENT_TYPE_OBJECT_SIGNALED)
 		err = s.setPayload(event, object)
 		if err != nil {
 			return err
@@ -1035,23 +1099,32 @@ func (s *GenericServer[O]) Signal(ctx context.Context, request any, response any
 
 // notifyEvent converts the DAO event into an API event and publishes it using the PostgreSQL NOTIFY command.
 func (s *GenericServer[O]) notifyEvent(ctx context.Context, e dao.Event) error {
-	event := &privatev1.Event{}
-	event.SetId(uuid.New())
+	var eventType privatev1.EventType
 	switch e.Type {
 	case dao.EventTypeCreated:
-		event.SetType(privatev1.EventType_EVENT_TYPE_OBJECT_CREATED)
+		eventType = privatev1.EventType_EVENT_TYPE_OBJECT_CREATED
 	case dao.EventTypeUpdated:
-		event.SetType(privatev1.EventType_EVENT_TYPE_OBJECT_UPDATED)
+		eventType = privatev1.EventType_EVENT_TYPE_OBJECT_UPDATED
 	case dao.EventTypeDeleted:
-		event.SetType(privatev1.EventType_EVENT_TYPE_OBJECT_DELETED)
+		eventType = privatev1.EventType_EVENT_TYPE_OBJECT_DELETED
 	default:
 		return fmt.Errorf("unknown event kind '%s'", e.Type)
 	}
+	event := newEvent(eventType)
 	err := s.setPayload(event, e.Object)
 	if err != nil {
 		return err
 	}
 	return s.notifier.Notify(ctx, event)
+}
+
+// newEvent creates an event with the identity and generation timestamp shared by all event producers.
+func newEvent(eventType privatev1.EventType) *privatev1.Event {
+	return privatev1.Event_builder{
+		Id:        uuid.New(),
+		Type:      eventType,
+		Timestamp: timestamppb.Now(),
+	}.Build()
 }
 
 // setPayload sets the payload of the event message. If the payload field is not found the event is left unchanged. If a

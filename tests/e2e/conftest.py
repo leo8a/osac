@@ -35,12 +35,11 @@ def default_storage_tier() -> str:
     return env("OSAC_STORAGE_TIER", "local")
 
 
-def _bmaas_requires_serial_xdist(args: list[str]) -> bool:
-    """True when CLI targets BMaaS serial or the full e2e/bmaas suite.
+def _requires_serial_xdist(args: list[str]) -> bool:
+    """True when CLI targets a suite that must run sequentially.
 
-    Inventory exhaust lives in ``tests/e2e/bmaas/serial`` and must run ``-n 0``.
-    Sanity and regression stay on pyproject ``-n 4``. Broader invocations like
-    ``pytest tests/`` are not detected.
+    BMaaS serial/full and enablement suites require ``-n 0``.
+    Broader invocations like ``pytest tests/`` are not detected.
     """
     normalized = [str(a).replace("\\", "/").rstrip("/") for a in args]
     if not normalized:
@@ -51,6 +50,8 @@ def _bmaas_requires_serial_xdist(args: list[str]) -> bool:
         or a.endswith("tests/e2e/bmaas")
         or a.endswith("/e2e/bmaas")
         or a == "e2e/bmaas"
+        or a.endswith("e2e/enablement")
+        or "/e2e/enablement/" in (a + "/")
         for a in normalized
     )
 
@@ -64,7 +65,7 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     has already populated ``config.option.tx``. Must return None (cmdline_main
     is firstresult).
     """
-    if not _bmaas_requires_serial_xdist(list(config.args or [])):
+    if not _requires_serial_xdist(list(config.args or [])):
         return None
     config.option.numprocesses = 0
     if hasattr(config.option, "dist"):
@@ -84,9 +85,14 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "metering: test verifies metering events via the test adapter HTTP API")
     config.addinivalue_line("markers", "requires_caas: test requires the CaaS service to be enabled")
     config.addinivalue_line("markers", "requires_bmaas: test requires the BMaaS service to be enabled")
+    config.addinivalue_line("markers", "requires_vmaas: test requires the VMaaS service to be enabled")
+    config.addinivalue_line("markers", "reference_common: reference test shared by all service profiles")
+    config.addinivalue_line("markers", "reference_networking: shared networking reference test")
     config.addinivalue_line("markers", "sanity: fast, low-risk smoke test suitable for every PR")
     config.addinivalue_line("markers", "regression: broader/slower coverage, run on a schedule or on demand")
-    config.addinivalue_line("markers", "serial: must run alone, not in parallel with other tests (e.g. exhausts a shared resource)")
+    config.addinivalue_line(
+        "markers", "serial: must run alone, not in parallel with other tests (e.g. exhausts a shared resource)"
+    )
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
     if worker_id is not None:
         log_dir = Path(config.getini("log_file")).parent
@@ -288,7 +294,7 @@ def ensure_k8s_only_network_class(private_grpc: GRPCClient, k8s_hub_client: K8sC
 @pytest.fixture(scope="session")
 def cli(
     namespace: str, fulfillment_address: str, keycloak_url: str, jwt_username: str, jwt_password: str
-) -> Iterator[OsacCLI]:  # noqa: E501
+) -> Iterator[OsacCLI]:
     instance = OsacCLI(
         binary=env("OSAC_CLI_PATH", "osac"),
         address=f"https://{fulfillment_address.rsplit(':', 1)[0]}",
@@ -400,8 +406,8 @@ def jwt_grpc_tenant2(fulfillment_address: str, keycloak_url: str, jwt_password: 
 # --- Cross-cutting concern: Metering ---
 
 
-def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    metering_tests = [item for item in items if item.get_closest_marker("metering")]
+def pytest_collection_finish(session: pytest.Session) -> None:
+    metering_tests = [item for item in session.items if item.get_closest_marker("metering")]
     if metering_tests and not os.environ.get("METERING_ADAPTER_URL"):
         pytest.fail(
             f"METERING_ADAPTER_URL is not set but {len(metering_tests)} test(s) require metering. "

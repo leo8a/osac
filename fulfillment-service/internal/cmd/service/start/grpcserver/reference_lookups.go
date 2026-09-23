@@ -19,10 +19,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/references"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 func registerReferenceLookups(
@@ -188,6 +188,19 @@ func registerReferenceLookups(
 	}
 	references.RegisterDAOLookup(validator, "osac.private.v1.ClusterTemplateReference", clusterTemplatesDAO)
 	references.RegisterDAOLookup(validator, "osac.public.v1.ClusterTemplateReference", clusterTemplatesDAO)
+
+	addOnOperatorsDAO, err := dao.NewGenericDAO[*privatev1.AddOnOperator]().
+		SetLogger(logger).
+		SetTenancyLogic(tenancyLogic).
+		SetMetricsRegisterer(metricsRegisterer).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create AddOnOperator DAO for reference lookups: %w", err)
+	}
+	references.RegisterDAOLookup(validator, "osac.private.v1.AddOnOperatorReference", addOnOperatorsDAO)
+	references.RegisterDAOLookup(validator, "osac.public.v1.AddOnOperatorReference", addOnOperatorsDAO)
+	references.RegisterDAOLookup(validator, "osac.private.v1.AddOnOperatorLocalReference", addOnOperatorsDAO)
+	references.RegisterDAOLookup(validator, "osac.public.v1.AddOnOperatorLocalReference", addOnOperatorsDAO)
 
 	clusterCatalogItemsDAO, err := dao.NewGenericDAO[*privatev1.ClusterCatalogItem]().
 		SetLogger(logger).

@@ -21,11 +21,11 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/collections"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 var _ = Describe("Tenancy logic", func() {
@@ -570,7 +570,7 @@ var _ = Describe("Tenancy logic", func() {
 			Build()
 		Expect(err).ToNot(HaveOccurred())
 
-		// Create the template using the DAO:
+		// Use a shared Template so dependency scope is valid and creation reaches the nonexistent-tenant check.
 		templatesDao, err := dao.NewGenericDAO[*privatev1.ClusterTemplate]().
 			SetLogger(logger).
 			SetTenancyLogic(tenancy).
@@ -584,7 +584,7 @@ var _ = Describe("Tenancy logic", func() {
 					Description: "My template",
 					Metadata: privatev1.Metadata_builder{
 						Name:   "test-template",
-						Tenant: "my-tenant",
+						Tenant: auth.SharedTenant,
 					}.Build(),
 				}.Build(),
 			).

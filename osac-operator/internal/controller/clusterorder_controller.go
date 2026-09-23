@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-logr/logr"
 	hypershiftv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -29,6 +30,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -81,6 +83,11 @@ type ClusterOrderReconciler struct {
 	StallThresholds       ClusterOrderStallThresholds
 	Recorder              events.EventRecorder
 	now                   func() time.Time
+
+	// WorkerReconciler handles bare-metal worker failure detection,
+	// BMI replacement with escalating backoff, and terminal failure
+	// conditions. Nil when bare-metal worker handling is not enabled.
+	WorkerReconciler *BareMetalWorkerReconciler
 }
 
 const (
@@ -316,6 +323,7 @@ func (r *ClusterOrderReconciler) patchStatusWithRetry(ctx context.Context, key c
 		latest.Status.DesiredConfigVersion = computed.DesiredConfigVersion
 		latest.Status.ApiEndpoint = computed.ApiEndpoint
 		latest.Status.IngressEndpoint = computed.IngressEndpoint
+		latest.Status.Workers = computed.Workers
 		for _, c := range computed.Conditions {
 			apimeta.SetStatusCondition(&latest.Status.Conditions, c)
 		}
@@ -496,6 +504,26 @@ func (r *ClusterOrderReconciler) handleUpdate(ctx context.Context, _ reconcile.R
 		}
 	}
 
+	// Reconcile bare-metal worker failures (timeout detection, BMI replacement,
+	// terminal condition) when the worker reconciler is configured.
+	//
+	// NOTE: instance.Status.Workers is currently not populated by this
+	// controller. The BMaaS provisioning flow (a follow-up story) will
+	// populate Workers when bare-metal worker nodes are created for a
+	// ClusterOrder. Until then, the guard below keeps the reconciler
+	// inactive.
+	if r.WorkerReconciler != nil && len(instance.Status.Workers) > 0 {
+		workerResult, err := r.WorkerReconciler.ReconcileWorkers(ctx, instance)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if workerResult.RequeueAfter > 0 {
+			if provisionResult.RequeueAfter == 0 || workerResult.RequeueAfter < provisionResult.RequeueAfter {
+				provisionResult = workerResult
+			}
+		}
+	}
+
 	// If provision job needs polling, requeue for status updates
 	return r.withStallRequeue(instance, provisionResult), nil
 }
@@ -536,6 +564,10 @@ func (r *ClusterOrderReconciler) handleHostedCluster(ctx context.Context, instan
 	if err := r.handleNodePools(ctx, instance, nodePools); err != nil {
 		return err
 	}
+	// A successful provisioning job only means that the infrastructure request
+	// was accepted. Derive terminal readiness from the live HostedCluster and
+	// NodePool observations in this reconcile.
+	finalizeReadyIfProvisioned(log, instance, hc, nodePools.Items)
 	return nil
 }
 
@@ -680,24 +712,15 @@ func (r *ClusterOrderReconciler) handleNodePool(ctx context.Context, instance *v
 	nodePool *hypershiftv1beta1.NodePool) error {
 	log := ctrllog.FromContext(ctx)
 
-	// TODO: Currently there is no way to know what is the item of the `nodeRequests` field that corresponds to a
-	// node pool. The best we can do is check if there is exactly one, and then assume that this node pool
-	// corresponds to that node request.
-
 	log.Info("processing nodepool", "nodepool", nodePool.GetName())
-	nodeRequestsCount := len(instance.Spec.NodeRequests)
-	if nodeRequestsCount != 1 {
-		log.Info(
-			"expected exactly one node request, will ignore the node pool",
-			"node_pool", nodePool.Name,
-			"node_requests", nodeRequestsCount,
-		)
+	resourceClass, ok := nodePoolResourceClass(nodePool)
+	if !ok {
+		log.Info("node pool has no resource class label, will ignore it", "node_pool", nodePool.Name)
 		return nil
 	}
 
 	// Find the matching item inside the `nodeRequests` field of the status, or create a new one if there is no
 	// matching item yet.
-	resourceClass := instance.Spec.NodeRequests[0].ResourceClass
 	var nodeRequestStatus *v1alpha1.NodeRequest
 	for i, nodeRequestsItem := range instance.Status.NodeRequests {
 		log.Info("looking for resource class", "want", resourceClass, "have", nodeRequestsItem.ResourceClass)
@@ -737,6 +760,111 @@ func hostedClusterControlPlaneIsAvailable(hc *hypershiftv1beta1.HostedCluster) b
 func hostedClusterIsReady(hc *hypershiftv1beta1.HostedCluster) bool {
 	return (apimeta.IsStatusConditionTrue(hc.Status.Conditions, string(hypershiftv1beta1.ClusterVersionSucceeding)) &&
 		apimeta.IsStatusConditionFalse(hc.Status.Conditions, string(hypershiftv1beta1.HostedClusterDegraded)))
+}
+
+func hostedClusterAndNodePoolsAreReady(instance *v1alpha1.ClusterOrder, hc *hypershiftv1beta1.HostedCluster,
+	nodePools []hypershiftv1beta1.NodePool) bool {
+	if !hostedClusterControlPlaneIsAvailable(hc) ||
+		!apimeta.IsStatusConditionTrue(hc.Status.Conditions, string(hypershiftv1beta1.KubeAPIServerAvailable)) ||
+		!hostedClusterIsReady(hc) {
+		return false
+	}
+	return nodePoolsMatchRequests(instance.Spec.NodeRequests, nodePools)
+}
+
+func nodePoolsMatchRequests(requests []v1alpha1.NodeRequest, nodePools []hypershiftv1beta1.NodePool) bool {
+	if len(requests) == 0 || len(nodePools) == 0 {
+		return false
+	}
+	if nodeRequestsContainDuplicateResourceClasses(requests) {
+		return false
+	}
+	expectedReplicas := expectedNodePoolReplicas(requests)
+	if len(expectedReplicas) != len(nodePools) {
+		return false
+	}
+
+	seen := sets.New[string]()
+	for i := range nodePools {
+		resourceClass, ok := nodePoolResourceClass(&nodePools[i])
+		if !ok {
+			return false
+		}
+		expected, ok := expectedReplicas[resourceClass]
+		if !ok {
+			return false
+		}
+		if seen.Has(resourceClass) || !nodePoolMatchesRequest(&nodePools[i], expected) {
+			return false
+		}
+		seen.Insert(resourceClass)
+	}
+	return len(seen) == len(expectedReplicas)
+}
+
+func nodeRequestsContainDuplicateResourceClasses(requests []v1alpha1.NodeRequest) bool {
+	seen := sets.New[string]()
+	for _, request := range requests {
+		if seen.Has(request.ResourceClass) {
+			return true
+		}
+		seen.Insert(request.ResourceClass)
+	}
+	return false
+}
+
+func expectedNodePoolReplicas(requests []v1alpha1.NodeRequest) map[string]int {
+	expected := make(map[string]int, len(requests))
+	for _, request := range requests {
+		expected[request.ResourceClass] = request.NumberOfNodes
+	}
+	return expected
+}
+
+func nodePoolResourceClass(nodePool *hypershiftv1beta1.NodePool) (string, bool) {
+	resourceClass, ok := nodePool.Labels[agentResourceClassLabel]
+	return resourceClass, ok && resourceClass != ""
+}
+
+func nodePoolMatchesRequest(nodePool *hypershiftv1beta1.NodePool, expectedReplicas int) bool {
+	return nodePoolIsReady(nodePool) && int(nodePool.Status.Replicas) == expectedReplicas
+}
+
+func nodePoolIsReady(nodePool *hypershiftv1beta1.NodePool) bool {
+	allMachinesReady := false
+	poolReady := false
+	for _, condition := range nodePool.Status.Conditions {
+		switch condition.Type {
+		case hypershiftv1beta1.NodePoolAllMachinesReadyConditionType:
+			allMachinesReady = condition.Status == corev1.ConditionTrue
+		case hypershiftv1beta1.NodePoolReadyConditionType:
+			poolReady = condition.Status == corev1.ConditionTrue
+		}
+	}
+	return allMachinesReady && poolReady
+}
+
+func provisioningJobSucceeded(instance *v1alpha1.ClusterOrder) bool {
+	job := provisioning.FindLatestJobByType(instance.Status.ProvisioningJobs, v1alpha1.JobTypeProvision)
+	return job != nil && job.State == v1alpha1.JobStateSucceeded
+}
+
+func finalizeReadyIfProvisioned(log logr.Logger, instance *v1alpha1.ClusterOrder, hc *hypershiftv1beta1.HostedCluster,
+	nodePools []hypershiftv1beta1.NodePool) bool {
+	if !provisioningJobSucceeded(instance) {
+		return false
+	}
+	if nodeRequestsContainDuplicateResourceClasses(instance.Spec.NodeRequests) {
+		log.Info("node pool readiness blocked by duplicate resource class in node requests")
+		return false
+	}
+	if !hostedClusterAndNodePoolsAreReady(instance, hc, nodePools) {
+		return false
+	}
+
+	instance.Status.Phase = v1alpha1.ClusterOrderPhaseReady
+	instance.SetStatusCondition(v1alpha1.ConditionProgressing, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
+	return true
 }
 
 // deriveProvisioningSubStage returns a live sub-stage reason reflecting the current HC condition
@@ -950,8 +1078,9 @@ func (r *ClusterOrderReconciler) provisioningCallbacks(instance *v1alpha1.Cluste
 			}
 		},
 		OnSuccess: func(_ provisioning.ProvisionStatus) {
-			instance.Status.Phase = v1alpha1.ClusterOrderPhaseReady
-			instance.SetStatusCondition(v1alpha1.ConditionProgressing, metav1.ConditionFalse, "", v1alpha1.ReasonAsExpected)
+			// Job success only records the provisioning result. The live
+			// HostedCluster and NodePool observations determine the phase and
+			// detailed progressing reason.
 		},
 	}
 }

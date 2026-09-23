@@ -22,13 +22,13 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	. "github.com/onsi/ginkgo/v2/dsl/core"
 	. "github.com/onsi/gomega"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	grpccodes "google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/logging"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 // Config contains configuration options for the integration tests.
@@ -37,6 +37,9 @@ type Config struct {
 	// client secrets and user passwords. If the environment variable is set then that value will be used, otherwise
 	// a random one will be generated.
 	Secret string `json:"secret" envconfig:"secret" default:""`
+
+	// TestSuite selects the scenario exercised by a focused integration test run.
+	TestSuite string `json:"test_suite" envconfig:"test_suite" default:""`
 }
 
 var (
@@ -90,7 +93,9 @@ var _ = BeforeSuite(func() {
 		Expect(err).ToNot(HaveOccurred())
 	})
 
-	// Create a default cluster version for version resolution during cluster creation:
+	// Create a default cluster version for version resolution during cluster creation.
+	// Tolerate AlreadyExists so the suite can be re-run against a live cluster without
+	// needing to tear it down first.
 	cvClient := privatev1.NewClusterVersionsClient(tool.InternalView().AdminConn())
 	_, err = cvClient.Create(ctx, privatev1.ClusterVersionsCreateRequest_builder{
 		Object: privatev1.ClusterVersion_builder{
@@ -105,8 +110,9 @@ var _ = BeforeSuite(func() {
 		}.Build(),
 	}.Build())
 	if err != nil {
-		if st, ok := status.FromError(err); !ok || st.Code() != codes.AlreadyExists {
-			Expect(err).ToNot(HaveOccurred())
-		}
+		st, ok := grpcstatus.FromError(err)
+		Expect(ok && st.Code() == grpccodes.AlreadyExists).To(
+			BeTrue(), "BeforeSuite ClusterVersion create failed: %v", err,
+		)
 	}
 })

@@ -27,13 +27,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
-	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("Private compute instances server", func() {
@@ -288,7 +287,7 @@ var _ = Describe("Private compute instances server", func() {
 						Tenant: testTenant,
 					}.Build(),
 					Spec: privatev1.InstanceTypeSpec_builder{
-						Cores:     4,
+						Vcpus:     4,
 						MemoryGib: 16,
 						State:     privatev1.InstanceTypeState_INSTANCE_TYPE_STATE_ACTIVE,
 					}.Build(),
@@ -307,7 +306,7 @@ var _ = Describe("Private compute instances server", func() {
 					Id: "standard",
 					Metadata: privatev1.Metadata_builder{
 						Name:   "standard",
-						Tenant: testTenant,
+						Tenant: auth.SharedTenant,
 					}.Build(),
 					Spec: privatev1.StorageTierSpec_builder{
 						Description: "Standard storage tier",
@@ -347,7 +346,7 @@ var _ = Describe("Private compute instances server", func() {
 					{
 						Name:        "cpu_count",
 						Title:       "CPU Count",
-						Description: "Number of CPU cores",
+						Description: "Number of vCPUs",
 						Required:    false,
 						Type:        "type.googleapis.com/google.protobuf.Int32Value",
 						Default:     cpuDefault,
@@ -374,6 +373,19 @@ var _ = Describe("Private compute instances server", func() {
 
 			_, err = templatesDao.Create().SetObject(template).Do(ctx)
 			Expect(err).ToNot(HaveOccurred())
+		}
+
+		createUserDataSecret := func() *privatev1.Secret {
+			result, err := server.secretsDao.Create().SetObject(privatev1.Secret_builder{
+				Metadata: privatev1.Metadata_builder{
+					Name:   fmt.Sprintf("userdata-%s", uuid.NewString()[:8]),
+					Tenant: testTenant,
+				}.Build(),
+				Type: privatev1.SecretType_SECRET_TYPE_USER_DATA,
+				Data: map[string][]byte{userDataSecretDataKey: []byte("#cloud-config")},
+			}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			return result.GetObject()
 		}
 
 		It("Creates object", func() {
@@ -418,11 +430,28 @@ var _ = Describe("Private compute instances server", func() {
 			Expect(object.GetStatus().GetState()).To(Equal(privatev1.ComputeInstanceState_COMPUTE_INSTANCE_STATE_STARTING))
 		})
 
-		// Storage tier reference validation is now handled by the reference validator
-		// interceptor at the gRPC layer (StorageTierReference is registered in
-		// reference_lookups.go). These unit tests exercise the server directly without the
-		// interceptor chain, so invalid reference names are accepted at this level.
-		// Integration tests verify that the interceptor rejects nonexistent storage tiers.
+		It("Creates an object from a direct template with a canonical user data Secret", func() {
+			createTemplate("secret-template")
+			secret := createUserDataSecret()
+
+			response, err := server.Create(ctx, privatev1.ComputeInstancesCreateRequest_builder{
+				Object: privatev1.ComputeInstance_builder{
+					Metadata: privatev1.Metadata_builder{Name: fmt.Sprintf("test-%s", uuid.NewString()[:8])}.Build(),
+					Spec: privatev1.ComputeInstanceSpec_builder{
+						Template:       privatev1.ComputeInstanceTemplateReference_builder{Id: "secret-template"}.Build(),
+						UserDataSecret: privatev1.SecretLocalReference_builder{Name: secret.GetMetadata().GetName()}.Build(),
+						NetworkAttachments: []*privatev1.ComputeNetworkAttachment{
+							privatev1.ComputeNetworkAttachment_builder{
+								Subnet: privatev1.SubnetLocalReference_builder{Id: "test-subnet"}.Build(),
+							}.Build(),
+						},
+					}.Build(),
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(response.GetObject().GetSpec().GetUserDataSecret().GetId()).To(Equal(secret.GetId()))
+			Expect(response.GetObject().GetSpec().GetUserDataSecret().GetName()).To(Equal(secret.GetMetadata().GetName()))
+		})
 
 		It("Creates object with additional disks", func() {
 			createTemplate("general.small")
@@ -969,6 +998,93 @@ var _ = Describe("Private compute instances server", func() {
 			Expect(response).To(BeNil())
 		})
 
+		It("Rejects materialized catalog networks from a different project", func() {
+			createTemplate("catalog-network-template")
+			projectsDAO, err := dao.NewGenericDAO[*privatev1.Project]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+			Expect(err).ToNot(HaveOccurred())
+			_, err = projectsDAO.Create().SetObject(privatev1.Project_builder{Metadata: privatev1.Metadata_builder{Name: "destination", Tenant: testTenant}.Build()}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			catalogs, err := NewPrivateComputeInstanceCatalogItemsServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+			Expect(err).ToNot(HaveOccurred())
+			item, err := catalogs.Create(ctx, privatev1.ComputeInstanceCatalogItemsCreateRequest_builder{Object: privatev1.ComputeInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: "network-offering"}.Build(), Title: "Network offering", Published: true,
+				Template: privatev1.ComputeInstanceTemplateReference_builder{Id: "catalog-network-template"}.Build(),
+				Fields: privatev1.ComputeInstanceCatalogItemFields_builder{NetworkAttachments: privatev1.ComputeNetworkAttachmentListFieldPolicy_builder{
+					Locked: privatev1.ComputeNetworkAttachmentList_builder{Items: []*privatev1.ComputeNetworkAttachment{privatev1.ComputeNetworkAttachment_builder{Subnet: privatev1.SubnetLocalReference_builder{Id: "test-subnet"}.Build()}.Build()}}.Build(),
+				}.Build()}.Build(),
+			}.Build()}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			_, err = server.Create(ctx, privatev1.ComputeInstancesCreateRequest_builder{Object: privatev1.ComputeInstance_builder{
+				Metadata: privatev1.Metadata_builder{Name: "different-project-vm", Project: "destination"}.Build(),
+				Spec:     privatev1.ComputeInstanceSpec_builder{CatalogItem: privatev1.ComputeInstanceCatalogItemReference_builder{Id: item.GetObject().GetId()}.Build()}.Build(),
+			}.Build()}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("subnet"))
+		})
+
+		DescribeTable("validates final storage tiers for direct-template creation", func(state string, additional, inherited bool, expected grpccodes.Code) {
+			createTemplate("storage-validation-template")
+			ref := privatev1.StorageTierReference_builder{Name: "missing-tier"}.Build()
+			if state != "missing" {
+				tier, err := server.storageTiersDao.Create().SetObject(privatev1.StorageTier_builder{
+					Metadata: privatev1.Metadata_builder{Name: "validated-tier", Tenant: auth.SharedTenant, Finalizers: []string{"keep"}}.Build(),
+					Status:   privatev1.StorageTierStatus_builder{State: privatev1.StorageTierState_STORAGE_TIER_STATE_ACTIVE}.Build(),
+				}.Build()).Do(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				switch state {
+				case "deleted":
+					_, err = server.storageTiersDao.Delete().SetId(tier.GetObject().GetId()).Do(ctx)
+					Expect(err).NotTo(HaveOccurred())
+				case "inactive":
+					tier.GetObject().GetStatus().SetState(privatev1.StorageTierState_STORAGE_TIER_STATE_UNSPECIFIED)
+					_, err = server.storageTiersDao.Update().SetObject(tier.GetObject()).Do(ctx)
+					Expect(err).NotTo(HaveOccurred())
+				}
+				ref.SetName("validated-tier")
+			}
+			disk := privatev1.ComputeInstanceDisk_builder{SizeGib: proto.Int32(20), StorageTier: ref}.Build()
+			spec := privatev1.ComputeInstanceSpec_builder{
+				Template: privatev1.ComputeInstanceTemplateReference_builder{Id: "storage-validation-template"}.Build(),
+				NetworkAttachments: []*privatev1.ComputeNetworkAttachment{
+					privatev1.ComputeNetworkAttachment_builder{Subnet: privatev1.SubnetLocalReference_builder{Id: "test-subnet"}.Build()}.Build(),
+				},
+			}.Build()
+			if inherited {
+				template, err := server.templatesDao.Get().SetId("storage-validation-template").Do(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				template.GetObject().GetSpecDefaults().SetBootDisk(disk)
+				_, err = server.templatesDao.Update().SetObject(template.GetObject()).Do(ctx)
+				Expect(err).NotTo(HaveOccurred())
+			} else if additional {
+				spec.SetAdditionalDisks([]*privatev1.ComputeInstanceDisk{disk})
+			} else {
+				spec.SetBootDisk(disk)
+			}
+			response, err := server.Create(ctx, privatev1.ComputeInstancesCreateRequest_builder{
+				Object: privatev1.ComputeInstance_builder{Metadata: privatev1.Metadata_builder{Name: "validate-tier-vm"}.Build(), Spec: spec}.Build(),
+			}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(expected))
+			if expected == grpccodes.OK {
+				Expect(response.GetObject().GetSpec().GetBootDisk().GetStorageTier().GetId()).NotTo(BeEmpty())
+				Expect(response.GetObject().GetSpec().GetBootDisk().GetStorageTier().GetName()).To(Equal("validated-tier"))
+			} else {
+				stored, err := server.List(ctx, privatev1.ComputeInstancesListRequest_builder{Filter: new("this.metadata.name == 'validate-tier-vm'")}.Build())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(stored.GetItems()).To(BeEmpty())
+			}
+		},
+			Entry("missing boot tier", "missing", false, false, grpccodes.NotFound),
+			Entry("deleted boot tier", "deleted", false, false, grpccodes.InvalidArgument),
+			Entry("inactive boot tier", "inactive", false, false, grpccodes.FailedPrecondition),
+			Entry("missing additional tier", "missing", true, false, grpccodes.NotFound),
+			Entry("deleted additional tier", "deleted", true, false, grpccodes.InvalidArgument),
+			Entry("inactive additional tier", "inactive", true, false, grpccodes.FailedPrecondition),
+			Entry("missing inherited tier", "missing", false, true, grpccodes.NotFound),
+			Entry("deleted inherited tier", "deleted", false, true, grpccodes.InvalidArgument),
+			Entry("inactive inherited tier", "inactive", false, true, grpccodes.FailedPrecondition),
+			Entry("canonicalizes an active inherited tier", "active", false, true, grpccodes.OK),
+		)
+
 		It("Applies template spec defaults when user omits spec fields", func() {
 			createTemplate("defaults-template")
 
@@ -1311,18 +1427,18 @@ var _ = Describe("Private compute instances server", func() {
 				createTemplate("ci-template-id")
 			})
 
-			createCICatalogItem := func(id string, published bool, fieldDefs []*privatev1.FieldDefinition) {
+			createCICatalogItem := func(id string, published bool, fields *privatev1.ComputeInstanceCatalogItemFields) {
 				_, err := catalogItemsDao.Create().SetObject(
 					privatev1.ComputeInstanceCatalogItem_builder{
 						Id: id,
 						Metadata: privatev1.Metadata_builder{
 							Name:   id + "-name",
-							Tenant: "shared",
+							Tenant: testTenant,
 						}.Build(),
-						Title:            "Test CI Catalog Item",
-						Published:        published,
-						Template:         privatev1.ComputeInstanceTemplateReference_builder{Id: "ci-template-id"}.Build(),
-						FieldDefinitions: fieldDefs,
+						Title:     "Test CI Catalog Item",
+						Published: published,
+						Template:  privatev1.ComputeInstanceTemplateReference_builder{Id: "ci-template-id"}.Build(),
+						Fields:    fields,
 					}.Build(),
 				).Do(ctx)
 				Expect(err).ToNot(HaveOccurred())
@@ -1355,6 +1471,50 @@ var _ = Describe("Private compute instances server", func() {
 				Expect(object.GetSpec().GetCatalogItem().GetId()).To(Equal("ci-cat-happy"))
 			})
 
+			It("Materializes a catalog item and user data Secret during dry run without persisting", func() {
+				createCICatalogItem("ci-cat-secret", true, nil)
+				secret := createUserDataSecret()
+
+				response, err := server.Create(dryRunCtx(), privatev1.ComputeInstancesCreateRequest_builder{
+					Object: privatev1.ComputeInstance_builder{
+						Metadata: privatev1.Metadata_builder{Name: fmt.Sprintf("test-%s", uuid.NewString()[:8])}.Build(),
+						Spec: privatev1.ComputeInstanceSpec_builder{
+							CatalogItem:    privatev1.ComputeInstanceCatalogItemReference_builder{Id: "ci-cat-secret"}.Build(),
+							UserDataSecret: privatev1.SecretLocalReference_builder{Name: secret.GetMetadata().GetName()}.Build(),
+							NetworkAttachments: []*privatev1.ComputeNetworkAttachment{
+								privatev1.ComputeNetworkAttachment_builder{
+									Subnet: privatev1.SubnetLocalReference_builder{Id: "test-subnet"}.Build(),
+								}.Build(),
+							},
+						}.Build(),
+					}.Build(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(response.GetObject().GetSpec().GetUserDataSecret().GetId()).To(Equal(secret.GetId()))
+				_, err = server.generic.dao.Get().SetId(response.GetObject().GetId()).Do(ctx)
+				Expect(err).To(HaveOccurred())
+			})
+
+			It("Rejects a user data Secret when a catalog policy supplies inline user data", func() {
+				userData := "#cloud-config"
+				createCICatalogItem("ci-cat-userdata", true, privatev1.ComputeInstanceCatalogItemFields_builder{
+					UserData: privatev1.StringFieldPolicy_builder{Locked: &userData}.Build(),
+				}.Build())
+				secret := createUserDataSecret()
+
+				_, err := server.Create(ctx, privatev1.ComputeInstancesCreateRequest_builder{
+					Object: privatev1.ComputeInstance_builder{
+						Metadata: privatev1.Metadata_builder{Name: fmt.Sprintf("test-%s", uuid.NewString()[:8])}.Build(),
+						Spec: privatev1.ComputeInstanceSpec_builder{
+							CatalogItem:    privatev1.ComputeInstanceCatalogItemReference_builder{Id: "ci-cat-userdata"}.Build(),
+							UserDataSecret: privatev1.SecretLocalReference_builder{Id: secret.GetId()}.Build(),
+						}.Build(),
+					}.Build(),
+				}.Build())
+				Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+				Expect(err.Error()).To(ContainSubstring("user_data and user_data_secret are mutually exclusive"))
+			})
+
 			It("Creates compute instance with catalog item specified by name", func() {
 				createCICatalogItem("ci-cat-byname", true, nil)
 
@@ -1364,7 +1524,7 @@ var _ = Describe("Private compute instances server", func() {
 							Name: fmt.Sprintf("test-%s", uuid.NewString()[:8]),
 						}.Build(),
 						Spec: privatev1.ComputeInstanceSpec_builder{
-							CatalogItem: privatev1.ComputeInstanceCatalogItemReference_builder{Id: "ci-cat-byname-name"}.Build(),
+							CatalogItem: privatev1.ComputeInstanceCatalogItemReference_builder{Name: "ci-cat-byname-name"}.Build(),
 							NetworkAttachments: []*privatev1.ComputeNetworkAttachment{
 								privatev1.ComputeNetworkAttachment_builder{
 									Subnet: privatev1.SubnetLocalReference_builder{Id: "test-subnet"}.Build(),
@@ -1401,7 +1561,7 @@ var _ = Describe("Private compute instances server", func() {
 				Expect(ok).To(BeTrue())
 				Expect(status.Code()).To(Equal(grpccodes.NotFound))
 				Expect(status.Message()).To(Equal(
-					"there is no catalog item with identifier or name 'nonexistent'",
+					"catalog item 'nonexistent' not found",
 				))
 			})
 
@@ -1438,7 +1598,7 @@ var _ = Describe("Private compute instances server", func() {
 						Id: "ci-cat-no-template",
 						Metadata: privatev1.Metadata_builder{
 							Name:   "ci-cat-no-template-name",
-							Tenant: "shared",
+							Tenant: testTenant,
 						}.Build(),
 						Title:     "Catalog Item without template",
 						Published: true,
@@ -1495,17 +1655,7 @@ var _ = Describe("Private compute instances server", func() {
 			})
 
 			It("Rejects user value for non-editable field", func() {
-				createCICatalogItem("ci-cat-nonedit", true, []*privatev1.FieldDefinition{
-					privatev1.FieldDefinition_builder{
-						Path:     "ssh_public_key",
-						Editable: false,
-						Default:  structpb.NewStringValue("forced-key"),
-					}.Build(),
-					privatev1.FieldDefinition_builder{
-						Path:     "network_attachments",
-						Editable: true,
-					}.Build(),
-				})
+				createCICatalogItem("ci-cat-nonedit", true, privatev1.ComputeInstanceCatalogItemFields_builder{SshPublicKey: privatev1.StringFieldPolicy_builder{Locked: proto.String("forced-key")}.Build(), NetworkAttachments: privatev1.ComputeNetworkAttachmentListFieldPolicy_builder{Editable: &privatev1.EditableComputeNetworkAttachmentList{}}.Build()}.Build())
 
 				_, err := server.Create(ctx, privatev1.ComputeInstancesCreateRequest_builder{
 					Object: privatev1.ComputeInstance_builder{
@@ -1530,19 +1680,9 @@ var _ = Describe("Private compute instances server", func() {
 				Expect(status.Message()).To(ContainSubstring("not editable"))
 			})
 
-			DescribeTable("validates editable field against JSON Schema",
+			DescribeTable("accepts editable values without legacy JSON Schema constraints",
 				func(catID string, value string, expectError bool) {
-					createCICatalogItem(catID, true, []*privatev1.FieldDefinition{
-						privatev1.FieldDefinition_builder{
-							Path:             "ssh_public_key",
-							Editable:         true,
-							ValidationSchema: `{"type":"string","minLength":10}`,
-						}.Build(),
-						privatev1.FieldDefinition_builder{
-							Path:     "network_attachments",
-							Editable: true,
-						}.Build(),
-					})
+					createCICatalogItem(catID, true, privatev1.ComputeInstanceCatalogItemFields_builder{SshPublicKey: privatev1.StringFieldPolicy_builder{Editable: privatev1.EditableStringField_builder{}.Build()}.Build(), NetworkAttachments: privatev1.ComputeNetworkAttachmentListFieldPolicy_builder{Editable: &privatev1.EditableComputeNetworkAttachmentList{}}.Build()}.Build())
 
 					response, err := server.Create(ctx, privatev1.ComputeInstancesCreateRequest_builder{
 						Object: privatev1.ComputeInstance_builder{
@@ -1571,22 +1711,12 @@ var _ = Describe("Private compute instances server", func() {
 						Expect(response.GetObject().GetSpec().GetSshPublicKey()).To(Equal(value))
 					}
 				},
-				Entry("rejects value below minLength", "ci-cat-schema-reject", "short-val", true),
+				Entry("accepts a short value", "ci-cat-schema-reject", "short-val", false),
 				Entry("accepts value meeting minLength", "ci-cat-schema-accept", "long-enough-key", false),
 			)
 
 			It("Applies default for editable field when not provided", func() {
-				createCICatalogItem("ci-cat-dflt", true, []*privatev1.FieldDefinition{
-					privatev1.FieldDefinition_builder{
-						Path:     "ssh_public_key",
-						Editable: true,
-						Default:  structpb.NewStringValue("default-key"),
-					}.Build(),
-					privatev1.FieldDefinition_builder{
-						Path:     "network_attachments",
-						Editable: true,
-					}.Build(),
-				})
+				createCICatalogItem("ci-cat-dflt", true, privatev1.ComputeInstanceCatalogItemFields_builder{SshPublicKey: privatev1.StringFieldPolicy_builder{Editable: privatev1.EditableStringField_builder{DefaultValue: proto.String("default-key")}.Build()}.Build(), NetworkAttachments: privatev1.ComputeNetworkAttachmentListFieldPolicy_builder{Editable: &privatev1.EditableComputeNetworkAttachmentList{}}.Build()}.Build())
 
 				response, err := server.Create(ctx, privatev1.ComputeInstancesCreateRequest_builder{
 					Object: privatev1.ComputeInstance_builder{
@@ -1673,7 +1803,7 @@ var _ = Describe("Private compute instances server", func() {
 						Id: "ci-cat-no-defaults",
 						Metadata: privatev1.Metadata_builder{
 							Name:   "ci-cat-no-defaults-name",
-							Tenant: "shared",
+							Tenant: testTenant,
 						}.Build(),
 						Title:     "Catalog Item without defaults",
 						Published: true,
@@ -1742,7 +1872,7 @@ var _ = Describe("Private compute instances server", func() {
 						Id: "ci-cat-with-it",
 						Metadata: privatev1.Metadata_builder{
 							Name:   "ci-cat-with-it-name",
-							Tenant: "shared",
+							Tenant: testTenant,
 						}.Build(),
 						Title:     "Catalog Item with IT",
 						Published: true,
@@ -1810,7 +1940,7 @@ var _ = Describe("Private compute instances server", func() {
 						Id: "ci-cat-valid-it",
 						Metadata: privatev1.Metadata_builder{
 							Name:   "ci-cat-valid-it-name",
-							Tenant: "shared",
+							Tenant: testTenant,
 						}.Build(),
 						Title:     "Catalog Item with valid IT",
 						Published: true,
@@ -1887,7 +2017,7 @@ var _ = Describe("Private compute instances server", func() {
 						Tenant: testTenant,
 					}.Build(),
 					Spec: privatev1.InstanceTypeSpec_builder{
-						Cores:     4,
+						Vcpus:     4,
 						MemoryGib: 16,
 						State:     privatev1.InstanceTypeState_INSTANCE_TYPE_STATE_ACTIVE,
 					}.Build(),
@@ -1906,7 +2036,7 @@ var _ = Describe("Private compute instances server", func() {
 					Id: "standard",
 					Metadata: privatev1.Metadata_builder{
 						Name:   "standard",
-						Tenant: testTenant,
+						Tenant: auth.SharedTenant,
 					}.Build(),
 					Spec: privatev1.StorageTierSpec_builder{
 						Description: "Standard storage tier",
@@ -1930,7 +2060,7 @@ var _ = Describe("Private compute instances server", func() {
 					{
 						Name:        "cpu_count",
 						Title:       "CPU Count",
-						Description: "Number of CPU cores",
+						Description: "Number of vCPUs",
 						Required:    false,
 						Type:        "type.googleapis.com/google.protobuf.Int32Value",
 						Default:     cpuDefault,
@@ -2423,7 +2553,7 @@ var _ = Describe("Private compute instances server", func() {
 		})
 
 		Context("Update validation with deletion", func() {
-			It("Should skip state validation when isBeingDeleted=true", func() {
+			It("uses persisted deletion state when validating network updates", func() {
 				// Create with a READY subnet
 				subnet := createTestSubnet(ctx, virtualNetwork.GetId(), privatev1.SubnetState_SUBNET_STATE_READY)
 				sg := createTestSecurityGroup(ctx, virtualNetwork.GetId(), privatev1.SecurityGroupState_SECURITY_GROUP_STATE_READY)
@@ -2457,12 +2587,12 @@ var _ = Describe("Private compute instances server", func() {
 				_, err = subnetDAO.Update().SetObject(subnet).Do(ctx)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Mark the ComputeInstance as being deleted
+				// Supplying a timestamp must not mark the stored ComputeInstance as deleting.
 				deletionTime := timestamppb.Now()
 				created.GetMetadata().SetDeletionTimestamp(deletionTime)
 
 				// Try to update security groups while subnet is PENDING
-				// Should succeed because isBeingDeleted=true skips state validation
+				// A live object must still pass readiness validation.
 				created.GetSpec().SetNetworkAttachments([]*privatev1.ComputeNetworkAttachment{
 					privatev1.ComputeNetworkAttachment_builder{
 						Subnet:         privatev1.SubnetLocalReference_builder{Id: subnet.GetId()}.Build(),
@@ -2473,9 +2603,35 @@ var _ = Describe("Private compute instances server", func() {
 				updateRequest.SetObject(created)
 				updateRequest.SetUpdateMask(&fieldmaskpb.FieldMask{Paths: []string{"spec.network_attachments"}})
 
-				response, err := server.Update(ctx, updateRequest)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(response).ToNot(BeNil())
+				// An unmasked timestamp must not bypass validation of an active instance.
+				_, err = server.Update(ctx, updateRequest)
+				Expect(grpcstatus.Code(err)).To(Equal(grpccodes.FailedPrecondition))
+				updateRequest.SetUpdateMask(&fieldmaskpb.FieldMask{Paths: []string{
+					"spec.network_attachments", "metadata.deletion_timestamp",
+				}})
+				_, err = server.Update(ctx, updateRequest)
+				Expect(grpcstatus.Code(err)).To(Equal(grpccodes.FailedPrecondition))
+				stored, err := server.Get(ctx, privatev1.ComputeInstancesGetRequest_builder{Id: created.GetId()}.Build())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(stored.GetObject().GetMetadata().HasDeletionTimestamp()).To(BeFalse())
+				Expect(stored.GetObject().GetSpec().GetNetworkAttachments()[0].GetSecurityGroups()).To(HaveLen(1))
+
+				// Only Delete may establish the exemption; a finalizer keeps the object available.
+				_, err = server.Update(ctx, privatev1.ComputeInstancesUpdateRequest_builder{
+					Object:     privatev1.ComputeInstance_builder{Id: created.GetId(), Metadata: privatev1.Metadata_builder{Finalizers: []string{"test"}}.Build()}.Build(),
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"metadata.finalizers"}},
+				}.Build())
+				Expect(err).NotTo(HaveOccurred())
+				_, err = server.Delete(ctx, privatev1.ComputeInstancesDeleteRequest_builder{Id: created.GetId()}.Build())
+				Expect(err).NotTo(HaveOccurred())
+				updateRequest.SetUpdateMask(&fieldmaskpb.FieldMask{Paths: []string{"spec.network_attachments"}})
+				_, err = server.Update(ctx, updateRequest)
+				Expect(err).NotTo(HaveOccurred())
+				stored, err = server.Get(ctx, privatev1.ComputeInstancesGetRequest_builder{Id: created.GetId()}.Build())
+				Expect(err).NotTo(HaveOccurred())
+				Expect(stored.GetObject().GetMetadata().HasDeletionTimestamp()).To(BeTrue())
+				Expect(stored.GetObject().GetSpec().GetNetworkAttachments()[0].GetSecurityGroups()).To(BeEmpty())
+
 			})
 		})
 
@@ -2713,7 +2869,7 @@ var _ = Describe("Private compute instances server", func() {
 						Id: "tier1",
 						Metadata: privatev1.Metadata_builder{
 							Name:   "tier1",
-							Tenant: testTenant,
+							Tenant: auth.SharedTenant,
 						}.Build(),
 						Spec: privatev1.StorageTierSpec_builder{
 							Description: "Test storage tier 1",
@@ -2731,7 +2887,7 @@ var _ = Describe("Private compute instances server", func() {
 						Id: "tier2",
 						Metadata: privatev1.Metadata_builder{
 							Name:   "tier2",
-							Tenant: testTenant,
+							Tenant: auth.SharedTenant,
 						}.Build(),
 						Spec: privatev1.StorageTierSpec_builder{
 							Description: "Test storage tier 2",
@@ -2928,7 +3084,7 @@ var _ = Describe("Private compute instances server", func() {
 							Tenant: testTenant,
 						}.Build(),
 						Spec: privatev1.InstanceTypeSpec_builder{
-							Cores:     4,
+							Vcpus:     4,
 							MemoryGib: 16,
 							State:     state,
 						}.Build(),
@@ -3263,7 +3419,7 @@ var _ = Describe("Private compute instances server", func() {
 					Id: "standard",
 					Metadata: privatev1.Metadata_builder{
 						Name:   "standard",
-						Tenant: testTenant,
+						Tenant: auth.SharedTenant,
 					}.Build(),
 					Spec: privatev1.StorageTierSpec_builder{
 						Description: "Standard storage tier",
@@ -3290,7 +3446,7 @@ var _ = Describe("Private compute instances server", func() {
 						Tenant: testTenant,
 					}.Build(),
 					Spec: privatev1.InstanceTypeSpec_builder{
-						Cores:     4,
+						Vcpus:     4,
 						MemoryGib: 16,
 						State:     privatev1.InstanceTypeState_INSTANCE_TYPE_STATE_ACTIVE,
 					}.Build(),
@@ -3340,6 +3496,7 @@ var _ = Describe("Private compute instances server", func() {
 				Object: privatev1.ComputeInstance_builder{
 					Metadata: privatev1.Metadata_builder{
 						Tenant: testTenant,
+						Name:   "auto-eip-test",
 					}.Build(),
 					Spec: privatev1.ComputeInstanceSpec_builder{
 						Template: privatev1.ComputeInstanceTemplateReference_builder{Id: "auto-eip-template"}.Build(),
@@ -3376,7 +3533,7 @@ var _ = Describe("Private compute instances server", func() {
 			eip := eipList.GetItems()[0]
 			Expect(eip.GetMetadata().GetLabels()[autoCreatedLabel]).To(Equal("true"))
 			Expect(eip.GetSpec().GetPool().GetId()).To(Equal("pool-1"))
-			Expect(eip.GetStatus().GetAttached()).To(BeTrue())
+			Expect(eip.GetStatus().GetAttached()).To(BeFalse())
 
 			// Verify ExternalIPAttachment was created
 			eiaList, err := externalIPAttachmentDao.List().
@@ -3395,6 +3552,7 @@ var _ = Describe("Private compute instances server", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(poolResp.GetObject().GetStatus().GetAvailable()).To(Equal(int64(4)))
 			Expect(poolResp.GetObject().GetStatus().GetAllocated()).To(Equal(int64(1)))
+
 		})
 
 		It("Does not auto-provision when auto_external_ip_attachment is false", func() {
@@ -3462,6 +3620,7 @@ var _ = Describe("Private compute instances server", func() {
 			Expect(err).ToNot(HaveOccurred())
 			Expect(poolResp.GetObject().GetStatus().GetAvailable()).To(Equal(int64(5)))
 			Expect(poolResp.GetObject().GetStatus().GetAllocated()).To(Equal(int64(0)))
+
 		})
 
 		It("Rejects update to auto_external_ip_attachment", func() {
@@ -3489,4 +3648,47 @@ var _ = Describe("Private compute instances server", func() {
 			Expect(status.Message()).To(ContainSubstring("auto_external_ip_attachment"))
 		})
 	})
+})
+
+var _ = Describe("Catalog materialized defaults", func() {
+	It("selects a default subnet only from the destination project", func() {
+		projects, err := dao.NewGenericDAO[*privatev1.Project]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+		Expect(err).ToNot(HaveOccurred())
+		subnets, err := dao.NewGenericDAO[*privatev1.Subnet]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+		Expect(err).ToNot(HaveOccurred())
+		for _, name := range []string{"destination", "other"} {
+			_, err := projects.Create().SetObject(privatev1.Project_builder{Id: name, Metadata: privatev1.Metadata_builder{Name: name, Tenant: testTenant}.Build()}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			_, err = subnets.Create().SetObject(privatev1.Subnet_builder{Id: name, Metadata: privatev1.Metadata_builder{Name: name, Tenant: testTenant, Project: name, Labels: map[string]string{defaultLabel: "true"}}.Build(), Spec: privatev1.SubnetSpec_builder{Ipv4Cidr: new("10.0.0.0/24")}.Build(), Status: privatev1.SubnetStatus_builder{State: privatev1.SubnetState_SUBNET_STATE_READY}.Build()}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		subnet, err := findDefaultSubnet(ctx, logger, subnets, testTenant, "destination")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(subnet.GetId()).To(Equal("destination"))
+	})
+	DescribeTable("rechecks catalog disk tiers after authoring", func(additional bool) {
+		server, err := NewPrivateComputeInstancesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+		Expect(err).ToNot(HaveOccurred())
+		result, err := server.storageTiersDao.Create().SetObject(privatev1.StorageTier_builder{Metadata: privatev1.Metadata_builder{Name: "tier", Tenant: auth.SharedTenant}.Build(), Status: privatev1.StorageTierStatus_builder{State: privatev1.StorageTierState_STORAGE_TIER_STATE_ACTIVE}.Build()}.Build()).Do(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		tier := result.GetObject()
+		instance := privatev1.ComputeInstance_builder{Spec: &privatev1.ComputeInstanceSpec{}}.Build()
+		disk := privatev1.ComputeInstanceDisk_builder{StorageTier: privatev1.StorageTierReference_builder{Id: tier.GetId()}.Build()}.Build()
+		if additional {
+			instance.GetSpec().SetAdditionalDisks([]*privatev1.ComputeInstanceDisk{disk})
+		} else {
+			instance.GetSpec().SetBootDisk(disk)
+		}
+		Expect(server.validateStorageTiers(ctx, instance)).To(Succeed())
+		tier.GetStatus().SetState(privatev1.StorageTierState_STORAGE_TIER_STATE_UNSPECIFIED)
+		_, err = server.storageTiersDao.Update().SetObject(tier).Do(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(server.validateStorageTiers(ctx, instance)).ToNot(Succeed())
+		tier.GetStatus().SetState(privatev1.StorageTierState_STORAGE_TIER_STATE_ACTIVE)
+		_, err = server.storageTiersDao.Update().SetObject(tier).Do(ctx)
+		Expect(err).ToNot(HaveOccurred())
+	},
+		Entry("boot disk", false),
+		Entry("additional disk", true),
+	)
 })

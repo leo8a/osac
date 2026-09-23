@@ -14,14 +14,18 @@ language governing permissions and limitations under the License.
 package servers
 
 import (
+	"context"
 	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/proto"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	"github.com/osac-project/osac/fulfillment-service/internal/events"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("Default networking provisioner", func() {
@@ -85,6 +89,30 @@ var _ = Describe("Default networking provisioner", func() {
 		Expect(err).ToNot(HaveOccurred())
 		return resp.GetObject()
 	}
+
+	It("adds timestamps to callback events", func() {
+		ctrl := gomock.NewController(GinkgoT())
+		DeferCleanup(ctrl.Finish)
+		notifier := events.NewMockNotifier(ctrl)
+		notifier.EXPECT().
+			Notify(gomock.Any(), gomock.Any()).
+			Do(func(ctx context.Context, payload proto.Message) {
+				event := payload.(*privatev1.Event)
+				Expect(event.GetTimestamp()).ToNot(BeNil())
+			}).
+			Times(3)
+
+		callback := makeNotifyCallback[*privatev1.VirtualNetwork](notifier)
+		object := privatev1.VirtualNetwork_builder{Id: "callback-vnet"}.Build()
+		for _, eventType := range []dao.EventType{
+			dao.EventTypeCreated,
+			dao.EventTypeUpdated,
+			dao.EventTypeDeleted,
+		} {
+			err := callback(ctx, dao.Event{Type: eventType, Object: object})
+			Expect(err).ToNot(HaveOccurred())
+		}
+	})
 
 	BeforeEach(func() {
 		var err error
@@ -307,7 +335,7 @@ var _ = Describe("Default networking provisioner", func() {
 			Expect(eip.GetMetadata().GetLabels()).To(HaveKeyWithValue("osac.openshift.io/default", "true"))
 			Expect(eip.GetSpec().GetPool().GetId()).To(Equal(pool.GetId()))
 			Expect(eip.GetStatus().GetState()).To(Equal(privatev1.ExternalIPState_EXTERNAL_IP_STATE_PENDING))
-			Expect(eip.GetStatus().GetAttached()).To(BeTrue())
+			Expect(eip.GetStatus().GetAttached()).To(BeFalse())
 
 			ngList, err := provisioner.natGatewayDao.List().
 				SetFilter("this.metadata.tenant == 'nat-tenant'").

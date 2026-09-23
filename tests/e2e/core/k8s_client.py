@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from typing import Any
 
 from tests.e2e.core.runner import run, run_unchecked
+
+_CLUSTER_ORDER_NOT_FOUND_RE = re.compile(
+    r'Error from server \(NotFound\): clusterorders(?:\.osac\.openshift\.io)? "(?P<name>[^"]+)" not found',
+    re.IGNORECASE,
+)
 
 
 class K8sClient:
@@ -197,6 +203,19 @@ class K8sClient:
             *self._base(), "get", "virtualmachine", name, "-n", vm_namespace, "-o", "jsonpath={.spec.runStrategy}"
         )
 
+    def get_vm_host_devices(self, *, name: str, vm_namespace: str) -> str:
+        output, rc = self._get(
+            "get",
+            "virtualmachine",
+            name,
+            "-n",
+            vm_namespace,
+            "-o",
+            "jsonpath={.spec.template.spec.domain.devices.hostDevices}",
+            checked=False,
+        )
+        return output if rc == 0 else ""
+
     # Storage tier resolution
 
     def get_storage_class_for_tier(self, *, tier_name: str) -> str:
@@ -281,6 +300,20 @@ class K8sClient:
         )
         return output if rc == 0 else ""
 
+    def get_nat_gateway_name(self, *, uuid: str, checked: bool = True) -> str:
+        output, rc = self._get(
+            "get",
+            "natgateway",
+            "-n",
+            self.namespace,
+            "-l",
+            f"osac.openshift.io/natgateway-uuid={uuid}",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+            checked=checked,
+        )
+        return output if rc == 0 else ""
+
     # ClusterOrder queries
 
     def get_cluster_order_name(self, *, uuid: str, checked: bool = True) -> str:
@@ -297,11 +330,18 @@ class K8sClient:
         )
         return output if rc == 0 else ""
 
-    def get_cluster_order_phase(self, *, name: str, checked: bool = True) -> str:
-        output, rc = self._get(
-            "get", "clusterorder", name, "-n", self.namespace, "-o", "jsonpath={.status.phase}", checked=checked
-        )
-        return output if rc == 0 else ""
+    def get_cluster_order_phase(self, *, name: str, checked: bool = True) -> str | None:
+        # In unchecked mode, None means that this ClusterOrder is gone. Keep a
+        # successful lookup with no status phase as "" so pollers do not treat
+        # an unrelated kubectl failure as deletion.
+        args = ("get", "clusterorder", name, "-n", self.namespace, "-o", "jsonpath={.status.phase}")
+        output, rc = self._get(*args, checked=checked)
+        if rc == 0:
+            return output
+        not_found = _CLUSTER_ORDER_NOT_FOUND_RE.fullmatch(output.strip())
+        if not_found is not None and not_found.group("name") == name:
+            return None
+        raise subprocess.CalledProcessError(rc, [*self._base(), *args], output=output, stderr=output)
 
     def get_cluster_order_latest_job_id(self, *, name: str, job_type: str, checked: bool = True) -> str:
         output, rc = self._get("get", "clusterorder", name, "-n", self.namespace, "-o", "json", checked=checked)
@@ -337,6 +377,10 @@ class K8sClient:
         output = self.get_jsonpath(resource="clusterorder", name=name, jsonpath="{.spec}")
         return json.loads(output) if output else {}
 
+    def get_cluster_order_status(self, *, name: str) -> dict[str, Any]:
+        output = self.get_jsonpath(resource="clusterorder", name=name, jsonpath="{.status}")
+        return json.loads(output) if output else {}
+
     def get_cluster_order_condition_status(self, *, name: str, condition_type: str, checked: bool = True) -> str:
         output, rc = self._get("get", "clusterorder", name, "-n", self.namespace, "-o", "json", checked=checked)
         if rc != 0:
@@ -346,6 +390,22 @@ class K8sClient:
             if cond.get("type") == condition_type:
                 return cond.get("status", "")
         return ""
+
+    def get_cluster_order_events(self, *, name: str, checked: bool = True) -> list[dict[str, Any]]:
+        output, rc = self._get(
+            "get",
+            "events",
+            "-n",
+            self.namespace,
+            "--field-selector",
+            f"involvedObject.kind=ClusterOrder,involvedObject.name={name}",
+            "-o",
+            "json",
+            checked=checked,
+        )
+        if rc != 0:
+            return []
+        return json.loads(output).get("items", [])
 
     def get_cluster_order_finalizers(self, *, name: str, checked: bool = True) -> list[str]:
         output, rc = self._get("get", "clusterorder", name, "-n", self.namespace, "-o", "json", checked=checked)

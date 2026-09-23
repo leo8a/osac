@@ -69,7 +69,7 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 					SourceType: osacv1alpha1.ImageSourceTypeRegistry,
 					SourceRef:  "quay.io/test/test-image:latest",
 				},
-				Cores:       2,
+				VCPUs:       2,
 				MemoryGiB:   4,
 				BootDisk:    osacv1alpha1.DiskSpec{SizeGiB: 20, StorageTier: "standard"},
 				RunStrategy: osacv1alpha1.RunStrategyAlways,
@@ -236,38 +236,6 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 		})
 	})
 
-	Describe("Compute resource immutability", func() {
-		It("should reject changing cores", func() {
-			instance := createValidInstance("test-cores-immutable")
-			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
-
-			// Fetch latest version
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
-
-			// Try to change cores
-			instance.Spec.Cores = 4
-			err := k8sClient.Update(ctx, instance)
-			Expect(err).To(HaveOccurred())
-			Expect(apierrors.IsInvalid(err)).To(BeTrue())
-			Expect(err.Error()).To(ContainSubstring("cores is immutable"))
-		})
-
-		It("should reject changing memoryGiB", func() {
-			instance := createValidInstance("test-memory-immutable")
-			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
-
-			// Fetch latest version
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
-
-			// Try to change memory
-			instance.Spec.MemoryGiB = 8
-			err := k8sClient.Update(ctx, instance)
-			Expect(err).To(HaveOccurred())
-			Expect(apierrors.IsInvalid(err)).To(BeTrue())
-			Expect(err.Error()).To(ContainSubstring("memoryGiB is immutable"))
-		})
-	})
-
 	Describe("Disk immutability", func() {
 		It("should reject changing bootDisk size", func() {
 			instance := createValidInstance("test-bootdisk-immutable")
@@ -350,7 +318,7 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 			//
 			// To prevent nil-to-value transitions would require parent-level validation using has() checks,
 			// or a validating webhook. For the current use case, this limitation is acceptable since:
-			// 1. Most immutable fields are required (cores, memory, etc.)
+			// 1. Most immutable fields are required (vCPUs, memory, etc.)
 			// 2. Optional immutable fields (userDataSecretRef, sshKey) are typically set at creation
 			// 3. Changing a set value IS prevented by the validation
 			instance := createValidInstance("test-add-userdata")
@@ -386,6 +354,65 @@ var _ = Describe("ComputeInstance CEL Validation", func() {
 	})
 
 	Describe("Mutable fields", func() {
+		It("should allow changing vCPUs", func() {
+			instance := createValidInstance("test-vcpus-mutable")
+			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+
+			// Fetch latest version
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
+
+			// Change vCPUs - should succeed
+			instance.Spec.VCPUs = 4
+			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+
+			// Verify the change persisted
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
+			Expect(instance.Spec.VCPUs).To(Equal(int32(4)))
+		})
+
+		It("should reject updating vCPUs outside the allowed range", func() {
+			instance := createValidInstance("test-vcpus-bounds")
+			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
+			instance.Spec.VCPUs = 0
+			err := k8sClient.Update(ctx, instance)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue())
+
+			instance.Spec.VCPUs = 129
+			err = k8sClient.Update(ctx, instance)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue())
+		})
+
+		It("should allow changing memoryGiB", func() {
+			instance := createValidInstance("test-memory-mutable")
+			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+
+			// Fetch latest version
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
+
+			// Change memory - should succeed
+			instance.Spec.MemoryGiB = 8
+			Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+
+			// Verify the change persisted
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
+			Expect(instance.Spec.MemoryGiB).To(Equal(int32(8)))
+		})
+
+		It("should reject updating memoryGiB below the minimum", func() {
+			instance := createValidInstance("test-memory-below-minimum")
+			Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
+			instance.Spec.MemoryGiB = 0
+			err := k8sClient.Update(ctx, instance)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue())
+		})
+
 		It("should allow changing runStrategy", func() {
 			instance := createValidInstance("test-runstrategy-mutable")
 			instance.Spec.RunStrategy = osacv1alpha1.RunStrategyAlways

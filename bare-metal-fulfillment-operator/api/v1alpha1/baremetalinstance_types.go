@@ -19,8 +19,9 @@ package v1alpha1
 import (
 	"strings"
 
-	opv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	opv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
 )
 
 // BareMetalInstanceRunStrategy controls the desired power state of a BareMetalInstance.
@@ -211,8 +212,12 @@ const (
 	// HostConditionReasonPowerSyncFailed indicates a restart has failed
 	HostConditionReasonPowerSyncFailed = "PowerSyncFailed"
 
-	// HostConditionReasonPowerSyncRequired indicates a restart is required
-	// Reserved for future use — not set by any current code path
+	// HostConditionReasonPowerSyncRequired indicates a restart is still required but
+	// has not been triggered yet — the host was busy transitioning when the restart
+	// was attempted, so the reconciler backs off and retries. It is a benign
+	// in-progress reason (not a failure) and, unlike Progressing, does not mark a
+	// restart as already in flight, so the reconciler keeps re-triggering until a real
+	// restart is initiated. Set by triggerRestart on management.ErrTransitioning.
 	HostConditionReasonPowerSyncRequired = "PowerSyncRequired"
 
 	// HostConditionReasonNoMatchingHosts indicates no hosts match the selector labels

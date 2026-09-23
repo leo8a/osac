@@ -43,7 +43,6 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
@@ -54,6 +53,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/servers"
 	"github.com/osac-project/osac/fulfillment-service/internal/services"
 	itesting "github.com/osac-project/osac/fulfillment-service/internal/testing"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 func TestRegisterServers(t *testing.T) {
@@ -193,11 +193,14 @@ var _ = BeforeSuite(func() {
 		Build()
 	Expect(err).ToNot(HaveOccurred())
 
-	// Start a real gRPC server, with the same transaction interceptor production uses, and register every
-	// filterable resource through the exact same function production calls:
+	// Start a real gRPC server with the transaction and reference interceptors production uses, and
+	// register every filterable resource through the same function production calls:
+	referenceValidator, err := newReferenceValidator(logger, tenancy, metricsRegisterer)
+	Expect(err).ToNot(HaveOccurred())
 	server := itesting.NewServer(grpc.ChainUnaryInterceptor(
 		panicInterceptor.UnaryServer,
 		txInterceptor.UnaryServer,
+		referenceValidator.UnaryServer,
 	))
 	DeferCleanup(server.Stop)
 	_, err = RegisterResourceServers(ctx, server.Registrar(), ResourceServerDeps{
@@ -485,10 +488,12 @@ var _ = Describe("Conditional service registration", func() {
 	// CaaS service names (both public and private)
 	caasServices := []string{
 		"osac.public.v1.ClusterTemplates",
+		"osac.public.v1.AddOnOperators",
 		"osac.public.v1.ClusterCatalogItems",
 		"osac.public.v1.Clusters",
 		"osac.public.v1.ClusterVersions",
 		"osac.private.v1.ClusterTemplates",
+		"osac.private.v1.AddOnOperators",
 		"osac.private.v1.ClusterCatalogItems",
 		"osac.private.v1.Clusters",
 		"osac.private.v1.ClusterVersions",
@@ -599,6 +604,14 @@ var _ = Describe("Conditional service registration", func() {
 		for _, svc := range vmaasServices {
 			Expect(info).To(HaveKey(svc), "expected VMaaS service %s to be registered", svc)
 		}
+	})
+
+	It("registers DiskImages when only BMaaS is enabled", func() {
+		info, _, err := registerWithFlags(&services.Flags{CaaS: false, VMaaS: false, BMaaS: true, MaaS: false})
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(info).To(HaveKey("osac.public.v1.DiskImages"))
+		Expect(info).To(HaveKey("osac.private.v1.DiskImages"))
 	})
 
 	It("always registers shared infrastructure regardless of flags", func() {

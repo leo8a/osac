@@ -5,6 +5,7 @@ import subprocess
 
 import pytest
 
+from tests.e2e.bmaas.conftest import BMI_DISK_IMAGE_SOURCE_REF
 from tests.e2e.core.grpc_client import GRPCClient
 from tests.e2e.core.helpers import (
     assert_bmi_does_not_become_running,
@@ -92,7 +93,13 @@ def test_baremetal_instance_inventory_exhausted(
             wait_for_bmi_running(grpc=grpc, bmi_id=bmi_id)
 
         # Lifecycle checks after all claim BMIs are up (not interleaved with creates).
-        assert_bmi_lifecycle_on_running(grpc=grpc, k8s=k8s_hub_client, bmi_id=bmi_ids[0], bmh_namespace=bmh_namespace)
+        _, bmh_name = assert_bmi_lifecycle_on_running(
+            grpc=grpc, k8s=k8s_hub_client, bmi_id=bmi_ids[0], bmh_namespace=bmh_namespace
+        )
+        image_url = k8s_hub_client.get_bmh_image_url(name=bmh_name, bmh_namespace=bmh_namespace)
+        assert image_url == BMI_DISK_IMAGE_SOURCE_REF, (
+            f"BMH {bmh_name} image URL {image_url!r} does not match the CatalogItem default DiskImage"
+        )
 
         available_after_claim: int = k8s_hub_client.count_bmhs_by_provisioning_state(
             bmh_namespace=bmh_namespace, states=_AVAILABLE_BMH_STATES

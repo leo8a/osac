@@ -13,8 +13,9 @@ language governing permissions and limitations under the License.
 
 package baremetalinstance
 
-//go:generate mockgen -source=../../api/osac/private/v1/baremetal_instances_service_grpc.pb.go -destination=bare_metal_instances_client_mock.go -package=baremetalinstance BareMetalInstancesClient
-//go:generate mockgen -source=../../api/osac/private/v1/secrets_service_grpc.pb.go -destination=secrets_client_mock.go -package=baremetalinstance SecretsClient
+//go:generate mockgen -destination=bare_metal_instances_client_mock.go -package=baremetalinstance github.com/osac-project/osac/proto/gen/osac/private/v1 BareMetalInstancesClient
+//go:generate mockgen -destination=secrets_client_mock.go -package=baremetalinstance github.com/osac-project/osac/proto/gen/osac/private/v1 SecretsClient
+//go:generate mockgen -destination=disk_images_client_mock.go -package=baremetalinstance github.com/osac-project/osac/proto/gen/osac/private/v1 DiskImagesClient
 
 import (
 	"context"
@@ -30,19 +31,20 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clnt "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	bmfov1alpha1 "github.com/osac-project/osac/bare-metal-fulfillment-operator/api/v1alpha1"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/annotations"
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/labels"
 	"github.com/osac-project/osac/fulfillment-service/internal/masks"
 	"github.com/osac-project/osac/fulfillment-service/internal/utils"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 const objectPrefix = "bmi-"
@@ -62,15 +64,15 @@ type FunctionBuilder struct {
 }
 
 type function struct {
-	logger                              *slog.Logger
-	hubCache                            controllers.HubCache
-	bareMetalInstancesClient            privatev1.BareMetalInstancesClient
-	bareMetalInstanceCatalogItemsClient privatev1.BareMetalInstanceCatalogItemsClient
-	bareMetalInstanceTypesClient        privatev1.BareMetalInstanceTypesClient
-	bareMetalInstanceTemplatesClient    privatev1.BareMetalInstanceTemplatesClient
-	hubsClient                          privatev1.HubsClient
-	secretsClient                       privatev1.SecretsClient
-	maskCalculator                      *masks.Calculator
+	logger                           *slog.Logger
+	hubCache                         controllers.HubCache
+	bareMetalInstancesClient         privatev1.BareMetalInstancesClient
+	bareMetalInstanceTypesClient     privatev1.BareMetalInstanceTypesClient
+	bareMetalInstanceTemplatesClient privatev1.BareMetalInstanceTemplatesClient
+	hubsClient                       privatev1.HubsClient
+	secretsClient                    privatev1.SecretsClient
+	diskImagesClient                 privatev1.DiskImagesClient
+	maskCalculator                   *masks.Calculator
 }
 
 type task struct {
@@ -121,15 +123,15 @@ func (b *FunctionBuilder) Build() (result controllers.ReconcilerFunction[*privat
 	}
 
 	object := &function{
-		logger:                              b.logger,
-		bareMetalInstancesClient:            privatev1.NewBareMetalInstancesClient(b.connection),
-		bareMetalInstanceCatalogItemsClient: privatev1.NewBareMetalInstanceCatalogItemsClient(b.connection),
-		bareMetalInstanceTypesClient:        privatev1.NewBareMetalInstanceTypesClient(b.connection),
-		bareMetalInstanceTemplatesClient:    privatev1.NewBareMetalInstanceTemplatesClient(b.connection),
-		hubsClient:                          privatev1.NewHubsClient(b.connection),
-		secretsClient:                       privatev1.NewSecretsClient(b.connection),
-		hubCache:                            b.hubCache,
-		maskCalculator:                      masks.NewCalculator().Build(),
+		logger:                           b.logger,
+		bareMetalInstancesClient:         privatev1.NewBareMetalInstancesClient(b.connection),
+		bareMetalInstanceTypesClient:     privatev1.NewBareMetalInstanceTypesClient(b.connection),
+		bareMetalInstanceTemplatesClient: privatev1.NewBareMetalInstanceTemplatesClient(b.connection),
+		hubsClient:                       privatev1.NewHubsClient(b.connection),
+		secretsClient:                    privatev1.NewSecretsClient(b.connection),
+		diskImagesClient:                 privatev1.NewDiskImagesClient(b.connection),
+		hubCache:                         b.hubCache,
+		maskCalculator:                   masks.NewCalculator().Build(),
 	}
 	result = object.run
 	return
@@ -633,20 +635,10 @@ func (t *task) mutateBMI(ctx context.Context, object *bmfov1alpha1.BareMetalInst
 	}
 	object.Annotations[annotations.Tenant] = t.bareMetalInstance.GetMetadata().GetTenant()
 
-	// Determine template ID: use direct template if present, otherwise resolve from catalog item.
-	var templateID string
-	if t.bareMetalInstance.GetSpec().HasTemplate() {
-		templateID = t.bareMetalInstance.GetSpec().GetTemplate().GetId()
-	} else if t.bareMetalInstance.GetSpec().HasCatalogItem() {
-		catalogItemResp, err := t.r.bareMetalInstanceCatalogItemsClient.Get(ctx, privatev1.BareMetalInstanceCatalogItemsGetRequest_builder{
-			Id: t.bareMetalInstance.GetSpec().GetCatalogItem().GetId(),
-		}.Build())
-		if err != nil {
-			return fmt.Errorf("failed to get catalog item '%s': %w", t.bareMetalInstance.GetSpec().GetCatalogItem().GetId(), err)
-		}
-		templateID = catalogItemResp.GetObject().GetTemplate().GetId()
-	} else {
-		return fmt.Errorf("BareMetalInstance must have either template or catalog_item")
+	// The API materializes the Template; the catalog reference is provenance only.
+	templateID := t.bareMetalInstance.GetSpec().GetTemplate().GetId()
+	if templateID == "" {
+		return fmt.Errorf("BareMetalInstance must have a materialized template")
 	}
 
 	// Resolve host selection labels for the CRD's Selector.HostSelector. When an instance type is
@@ -722,13 +714,15 @@ func (t *task) mutateBMI(ctx context.Context, object *bmfov1alpha1.BareMetalInst
 	if t.userDataSecretName != "" {
 		params["userDataSecret"] = t.userDataSecretName
 	}
-	if t.bareMetalInstance.GetSpec().HasImage() {
-		params["imageURL"] = t.bareMetalInstance.GetSpec().GetImage().GetSourceRef()
-		if st := t.bareMetalInstance.GetSpec().GetImage().GetSourceType(); st != "" {
-			params["imageSourceType"] = st
-		} else {
-			delete(params, "imageSourceType")
+	if diskImageRef := t.bareMetalInstance.GetSpec().GetDiskImage(); diskImageRef != nil {
+		diskImageKey := controllers.RefKeyStr(diskImageRef)
+		diResp, diErr := t.r.diskImagesClient.Get(ctx, privatev1.DiskImagesGetRequest_builder{
+			Id: diskImageKey,
+		}.Build())
+		if diErr != nil {
+			return fmt.Errorf("failed to resolve disk image '%s': %w", diskImageKey, diErr)
 		}
+		params["imageURL"] = diResp.GetObject().GetSpec().GetSourceRef()
 	}
 	if len(params) > 0 {
 		paramsJSON, err := json.Marshal(params)
@@ -801,13 +795,10 @@ func (t *task) ensureUserDataSecret(ctx context.Context, owner *bmfov1alpha1.Bar
 		},
 	}
 
-	_, err = controllerutil.CreateOrPatch(ctx, t.hubClient, secret, func() error {
-		if secret.StringData == nil {
-			secret.StringData = map[string]string{}
-		}
-		secret.StringData[userDataSecretKey] = userData
+	err = t.hubClient.Create(ctx, secret)
+	if apierrors.IsAlreadyExists(err) {
 		return nil
-	})
+	}
 	if err != nil {
 		return err
 	}

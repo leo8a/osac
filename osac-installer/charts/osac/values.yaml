@@ -6,6 +6,8 @@
 # between the umbrella chart's own templates and its subcharts without
 # duplicating it as separate --set flags per value.
 global:
+  # Required stable identity for this OSAC/fulfillment-service deployment.
+  osacDeploymentId: ""
   # [REQUIRED on OpenShift, via --set global.clusterDomain=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')]
   # Backs the tpl-templated defaults below (service.auth.issuerUrl,
   # service.idp.url, service.vault.keycloakIssuerUrl) so they automatically
@@ -13,6 +15,10 @@ global:
   # OpenShift cluster. Leave empty for platforms (e.g. kind) that set these
   # three values explicitly instead.
   clusterDomain: ""
+  # Resolved external fulfillment endpoint used by tenant-cluster CSI jobs.
+  # Leave empty to derive <service.externalHostname>:443 for OpenShift.
+  fulfillment:
+    endpoint: ""
   # --- Service Enablement ---
   # Controls which service tiers are active across all OSAC components.
   # When all are true (the default), OSAC operates as a full-stack cloud.
@@ -50,7 +56,7 @@ operator:
   enabled: true
   image:
     repository: ghcr.io/osac-project/osac-operator
-    tag: latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    tag: latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
     pullPolicy: Always
   replicaCount: 1
   resources:
@@ -74,6 +80,9 @@ operator:
   fulfillment:
     serverAddress: "fulfillment-internal-api:8001"
     tokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    configMap:
+      name: "osac-fulfillment-config"
+      optional: true
   controllers:
     tenant: true
     networking: true
@@ -93,7 +102,7 @@ service:
   # [REQUIRED] Hostname for the internal API Route (e.g. fulfillment-internal-api-osac.apps.mycluster.example.com)
   internalHostname: ""
   images:
-    service: ghcr.io/osac-project/fulfillment-service:latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    service: ghcr.io/osac-project/fulfillment-service:latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
     envoy: ghcr.io/osac-project/envoy:v1.33.0
   certs:
     issuerRef:
@@ -126,14 +135,13 @@ service:
     headers: false
     bodies: false
   vault:
-    # Vault API endpoint. tpl is applied at render time, so
-    # {{ .Release.Namespace }} expands to the actual install namespace --
-    # correct by default for the in-cluster bundled OpenBao service on any
-    # namespace. Leave empty to disable Vault integration entirely (no
-    # --vault-endpoint flag is passed to the controller when endpoint is
-    # empty, even if credentials are configured). Override with a real
-    # external Vault URL when not using the bundled OpenBao.
-    endpoint: "https://openbao.{{ .Release.Namespace }}.svc.cluster.local:8200"
+    # Vault API endpoint. Points to the osac-infra namespace by default,
+    # where bundled OpenBao is deployed after OSAC-4916. Leave empty to
+    # disable Vault integration entirely (no --vault-endpoint flag is
+    # passed to the controller when endpoint is empty, even if credentials
+    # are configured). Override with an external Vault URL when not using
+    # the bundled OpenBao.
+    endpoint: "https://openbao.osac-infra.svc.cluster.local:8200"
     namespace: osac
     kvMountPath: secret
     lifecycleRole: ""
@@ -169,7 +177,7 @@ aap:
       imagePullPolicy: IfNotPresent
   bootstrap:
     enabled: true
-    image: ghcr.io/osac-project/osac-aap:latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    image: ghcr.io/osac-project/osac-aap:latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
     backoffLimit: 15
     readinessConsecutiveSuccesses: 3
     gateway:
@@ -272,14 +280,14 @@ ui:
   log:
     level: info
   images:
-    ui: ghcr.io/osac-project/osac-ui:latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    ui: ghcr.io/osac-project/osac-ui:latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
 
 # --- Metering ---
 metering:
   enabled: false
   image:
     repository: ghcr.io/osac-project/metering-service
-    tag: latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    tag: latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
     pullPolicy: Always
 
 # --- CSI Driver ---
@@ -287,7 +295,7 @@ csiDriver:
   enabled: false
   image:
     repository: ghcr.io/osac-project/osac-csi-driver
-    tag: latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    tag: latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
     pullPolicy: Always
 
 # --- CSI Backends ---
@@ -300,7 +308,7 @@ bmfCrds: {}
 bmf:
   image:
     repository: ghcr.io/osac-project/bare-metal-fulfillment-operator
-    tag: latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    tag: latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
     pullPolicy: Always
   replicaCount: 1
   resources:
@@ -372,26 +380,6 @@ metallb:
 
 hubAccess:
   enabled: false
-
-bundledVault:
-  enabled: true
-  devRootToken: "dev-root-token"
-  image: "ghcr.io/openbao/openbao:2.6.2"
-  # podSecurityContext: {}
-  # Leave absent (nil) to use the template's built-in standard-Kubernetes defaults
-  # (runAsNonRoot: true, runAsUser: 100, runAsGroup: 1000, fsGroup: 1000).
-  # On OpenShift with restricted-v2 SCC, set this to just {runAsNonRoot: true}
-  # in the profile's instance.yaml — the SCC allocates UIDs from the namespace
-  # UID range and resolves the named user automatically. Any non-nil value here
-  # FULLY REPLACES the template default (no Helm key-merge), so partial overrides
-  # must include every key you want rendered.
-  resources:
-    limits:
-      cpu: 500m
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 256Mi
 
 clusterVersions:
   enabled: false

@@ -17,7 +17,8 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 
-	privatev1 "github.com/osac-project/osac-metering/internal/api/osac/private/v1"
+	"github.com/osac-project/osac-metering/schema"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 const ClusterStatePrefix = "CLUSTER_STATE_"
@@ -93,8 +94,12 @@ func (m *clusterMapper) IsBillable() bool {
 	return IsClusterBillableState(m.CurrentState())
 }
 
-func (m *clusterMapper) BillingDimensionsMap() map[string]any {
-	return ClusterBillingDimensions(m.cl)
+func (m *clusterMapper) BillingDimensionsMap() (map[string]any, error) {
+	return ClusterBillingDimensions(m.cl), nil
+}
+
+func (m *clusterMapper) Usage(string, *time.Time, time.Time, map[string]any) (*schema.Usage, error) {
+	return nil, nil
 }
 
 // CaaS cluster state machine. Both PROGRESSING and READY are billable.
@@ -163,10 +168,10 @@ func (m *clusterMapper) CloudEventType(eventType privatev1.EventType, previousSt
 	return ResolveCloudEventType(clusterTransitions, eventType, previousState, m.CurrentState())
 }
 
-func (m *clusterMapper) TransitionTime(eventType privatev1.EventType) (time.Time, error) {
-	return ResolveTransitionTime(eventType,
+func (m *clusterMapper) TransitionTime(event *privatev1.Event, _ string) (time.Time, error) {
+	return ResolveTransitionTime(event.GetType(),
+		event.GetTimestamp(),
 		m.cl.GetMetadata().GetCreationTimestamp(),
-		m.cl.GetMetadata().GetDeletionTimestamp(),
 		m.cl.GetStatus().GetStateTransitionTime(),
 		m.cl.GetId())
 }

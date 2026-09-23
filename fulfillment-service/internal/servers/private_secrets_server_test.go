@@ -26,13 +26,13 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/collections"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("Private secrets server", func() {
@@ -334,12 +334,25 @@ var _ = Describe("Private secrets server", func() {
 				Expect(st.Message()).To(ContainSubstring("metadata.name"))
 			})
 
-			It("Create without data fails", func() {
+			It("Create without a type or data defaults to opaque", func() {
+				response, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name: "my-secret",
+						}.Build(),
+					}.Build(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(response.GetObject().GetType()).To(Equal(privatev1.SecretType_SECRET_TYPE_OPAQUE))
+			})
+
+			It("Create value secret without data fails", func() {
 				_, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
 					Object: privatev1.Secret_builder{
 						Metadata: privatev1.Metadata_builder{
 							Name: "my-secret",
 						}.Build(),
+						Type: privatev1.SecretType_SECRET_TYPE_VALUE,
 					}.Build(),
 				}.Build())
 				Expect(err).To(HaveOccurred())
@@ -349,35 +362,20 @@ var _ = Describe("Private secrets server", func() {
 				Expect(st.Message()).To(ContainSubstring("data"))
 			})
 
-			It("Create Vault secret without data fails", func() {
+			It("Create pull secret without its required data key fails", func() {
 				_, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
 					Object: privatev1.Secret_builder{
 						Metadata: privatev1.Metadata_builder{
 							Name: "my-secret",
 						}.Build(),
-						Backend: privatev1.SecretBackend_SECRET_BACKEND_VAULT,
+						Type: privatev1.SecretType_SECRET_TYPE_PULL_SECRET,
 					}.Build(),
 				}.Build())
 				Expect(err).To(HaveOccurred())
 				st, ok := status.FromError(err)
 				Expect(ok).To(BeTrue())
 				Expect(st.Code()).To(Equal(codes.InvalidArgument))
-				Expect(st.Message()).To(ContainSubstring("data"))
-			})
-
-			It("Create unspecified backend without data fails", func() {
-				_, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
-					Object: privatev1.Secret_builder{
-						Metadata: privatev1.Metadata_builder{
-							Name: "my-secret",
-						}.Build(),
-					}.Build(),
-				}.Build())
-				Expect(err).To(HaveOccurred())
-				st, ok := status.FromError(err)
-				Expect(ok).To(BeTrue())
-				Expect(st.Code()).To(Equal(codes.InvalidArgument))
-				Expect(st.Message()).To(ContainSubstring("data"))
+				Expect(st.Message()).To(ContainSubstring(".dockerconfigjson"))
 			})
 
 			It("Create Hub secret without coordinates fails", func() {
@@ -482,6 +480,62 @@ var _ = Describe("Private secrets server", func() {
 		})
 
 		Describe("Immutability", func() {
+			DescribeTable("Update of user data Secret data fails",
+				func(updateMask *fieldmaskpb.FieldMask) {
+					existing := privatev1.Secret_builder{
+						Type: privatev1.SecretType_SECRET_TYPE_USER_DATA,
+						Data: map[string][]byte{"userdata": []byte("original")},
+					}.Build()
+					updated := privatev1.Secret_builder{
+						Type: privatev1.SecretType_SECRET_TYPE_USER_DATA,
+						Data: map[string][]byte{"userdata": []byte("changed")},
+					}.Build()
+
+					err := server.validateSecretUpdate(ctx, updated, updateMask, existing)
+					Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+					Expect(err.Error()).To(ContainSubstring("data"))
+					Expect(err.Error()).To(ContainSubstring("immutable"))
+				},
+				Entry("with an explicit data mask", &fieldmaskpb.FieldMask{Paths: []string{"data"}}),
+				Entry("with an empty mask", &fieldmaskpb.FieldMask{}),
+				Entry("with no mask", nil),
+			)
+
+			It("allows metadata-only updates to user data Secrets", func() {
+				existing := privatev1.Secret_builder{Type: privatev1.SecretType_SECRET_TYPE_USER_DATA}.Build()
+				updated := privatev1.Secret_builder{Type: privatev1.SecretType_SECRET_TYPE_USER_DATA}.Build()
+				Expect(server.validateSecretUpdate(ctx, updated,
+					&fieldmaskpb.FieldMask{Paths: []string{"metadata.labels"}}, existing)).To(Succeed())
+			})
+
+			It("allows data updates to opaque Secrets", func() {
+				existing := privatev1.Secret_builder{Type: privatev1.SecretType_SECRET_TYPE_OPAQUE}.Build()
+				updated := privatev1.Secret_builder{
+					Type: privatev1.SecretType_SECRET_TYPE_OPAQUE,
+					Data: map[string][]byte{"key": []byte("changed")},
+				}.Build()
+				Expect(server.validateSecretUpdate(ctx, updated,
+					&fieldmaskpb.FieldMask{Paths: []string{"data"}}, existing)).To(Succeed())
+			})
+
+			It("Update changing type fails", func() {
+				created := createVaultSecret()
+
+				_, err := server.Update(ctx, privatev1.SecretsUpdateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Id:   created.GetId(),
+						Type: privatev1.SecretType_SECRET_TYPE_VALUE,
+					}.Build(),
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"type"}},
+				}.Build())
+				Expect(err).To(HaveOccurred())
+				st, ok := status.FromError(err)
+				Expect(ok).To(BeTrue())
+				Expect(st.Code()).To(Equal(codes.InvalidArgument))
+				Expect(st.Message()).To(ContainSubstring("type"))
+				Expect(st.Message()).To(ContainSubstring("immutable"))
+			})
+
 			It("Update changing backend fails", func() {
 				created := createVaultSecret()
 

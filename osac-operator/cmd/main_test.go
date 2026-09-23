@@ -28,6 +28,7 @@ import (
 
 	"github.com/osac-project/osac/osac-operator/internal/controller"
 
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
@@ -149,6 +150,32 @@ var _ = Describe("clusterOrderStallThresholdsFromEnv", func() {
 		thresholds := clusterOrderStallThresholdsFromEnv()
 
 		Expect(thresholds).To(Equal(controller.DefaultClusterOrderStallThresholds()))
+	})
+})
+
+var _ = Describe("tenant CSI fulfillment configuration", func() {
+	BeforeEach(func() {
+		for _, variable := range []string{envFulfillmentEndpoint, envFulfillmentIssuerURL} {
+			variable := variable
+			originalValue, wasSet := os.LookupEnv(variable)
+			DeferCleanup(func() {
+				if wasSet {
+					Expect(os.Setenv(variable, originalValue)).To(Succeed())
+					return
+				}
+				Expect(os.Unsetenv(variable)).To(Succeed())
+			})
+			Expect(os.Unsetenv(variable)).To(Succeed())
+		}
+	})
+
+	It("reads endpoint and issuer values from the operator environment", func() {
+		Expect(os.Setenv(envFulfillmentEndpoint, "fulfillment-api.example.com:443")).To(Succeed())
+		Expect(os.Setenv(envFulfillmentIssuerURL, "https://keycloak.example.com/realms/osac")).To(Succeed())
+
+		endpoint, issuerURL := fulfillmentConfigFromEnv()
+		Expect(endpoint).To(Equal("fulfillment-api.example.com:443"))
+		Expect(issuerURL).To(Equal("https://keycloak.example.com/realms/osac"))
 	})
 })
 
@@ -353,6 +380,33 @@ var _ = Describe("parseVendorControllers", func() {
 		_, err := parseVendorControllers("vast=")
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("backend and endpoint must not be empty"))
+	})
+})
+
+var _ = Describe("newVendorProvisionerRegistry", func() {
+	It("registers VAST and marks unsupported providers as unimplemented", func() {
+		registry, err := newVendorProvisionerRegistry(
+			fake.NewClientBuilder().Build(),
+			"osac-system",
+			map[string]string{"vast": "vast.svc:50051", "netapp": "netapp.svc:50052"},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(registry).To(HaveLen(2))
+		Expect(registry["vast"]).To(BeAssignableToTypeOf(&controller.VastVendorProvisioner{}))
+		_, registered := registry["netapp"]
+		Expect(registered).To(BeTrue())
+		Expect(registry["netapp"]).To(BeNil())
+	})
+
+	It("marks future provider keys as unimplemented", func() {
+		registry, err := newVendorProvisionerRegistry(
+			fake.NewClientBuilder().Build(),
+			"osac-system",
+			map[string]string{"netapp": "netapp.svc:50052"},
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(registry).To(HaveLen(1))
+		Expect(registry["netapp"]).To(BeNil())
 	})
 })
 

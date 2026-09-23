@@ -32,14 +32,14 @@ import (
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/logging"
 	"github.com/osac-project/osac/fulfillment-service/internal/network"
 	"github.com/osac-project/osac/fulfillment-service/internal/servers"
 	"github.com/osac-project/osac/fulfillment-service/internal/services"
 	shtdwn "github.com/osac-project/osac/fulfillment-service/internal/shutdown"
 	"github.com/osac-project/osac/fulfillment-service/internal/version"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 // Cmd creates and returns the `start rest-gateway` command.
@@ -306,7 +306,7 @@ func (c *runnerContext) registerHandlers(ctx context.Context, mux *runtime.Serve
 
 // buildHandlerList returns the complete set of grpc-gateway handler registrars.
 // All handlers are always registered; disabled services are rejected by the gRPC
-// server's UnknownServiceHandler, which grpc-gateway translates to HTTP 503.
+// server's tap handler, which grpc-gateway translates to HTTP 503.
 func buildHandlerList() []handlerRegistrar {
 	return []handlerRegistrar{
 		// Shared public API:
@@ -315,6 +315,7 @@ func buildHandlerList() []handlerRegistrar {
 		publicv1.RegisterVirtualNetworksHandler,
 		publicv1.RegisterSubnetsHandler,
 		publicv1.RegisterSecurityGroupsHandler,
+		publicv1.RegisterFabricDomainsHandler,
 		publicv1.RegisterNATGatewaysHandler,
 		publicv1.RegisterExternalIPPoolsHandler,
 		publicv1.RegisterExternalIPsHandler,
@@ -323,12 +324,14 @@ func buildHandlerList() []handlerRegistrar {
 		publicv1.RegisterRoleBindingsHandler,
 		publicv1.RegisterJsonWebKeySetHandler,
 		publicv1.RegisterStorageTiersHandler,
+		publicv1.RegisterVolumesHandler,
 		// Shared private API:
 		privatev1.RegisterCapabilitiesHandler,
 		privatev1.RegisterEventsHandler,
 		privatev1.RegisterHostTypesHandler,
 		privatev1.RegisterHubsHandler,
 		privatev1.RegisterNetworkClassesHandler,
+		privatev1.RegisterFabricDomainsHandler,
 		privatev1.RegisterSecretsHandler,
 		privatev1.RegisterStorageBackendsHandler,
 		privatev1.RegisterStorageTiersHandler,
@@ -341,12 +344,15 @@ func buildHandlerList() []handlerRegistrar {
 		privatev1.RegisterExternalIPAttachmentsHandler,
 		privatev1.RegisterRolesHandler,
 		privatev1.RegisterRoleBindingsHandler,
+		privatev1.RegisterVolumesHandler,
 		// CaaS:
 		publicv1.RegisterClusterTemplatesHandler,
+		publicv1.RegisterAddOnOperatorsHandler,
 		publicv1.RegisterClusterCatalogItemsHandler,
 		publicv1.RegisterClustersHandler,
 		publicv1.RegisterClusterVersionsHandler,
 		privatev1.RegisterClusterTemplatesHandler,
+		privatev1.RegisterAddOnOperatorsHandler,
 		privatev1.RegisterClusterCatalogItemsHandler,
 		privatev1.RegisterClustersHandler,
 		privatev1.RegisterClusterVersionsHandler,
@@ -362,7 +368,6 @@ func buildHandlerList() []handlerRegistrar {
 		privatev1.RegisterComputeInstancesHandler,
 		privatev1.RegisterDiskImagesHandler,
 		privatev1.RegisterInstanceTypesHandler,
-		privatev1.RegisterVolumesHandler,
 		// BMaaS:
 		publicv1.RegisterBareMetalInstanceTemplatesHandler,
 		publicv1.RegisterBareMetalInstanceCatalogItemsHandler,

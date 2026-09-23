@@ -22,7 +22,7 @@ from tests.e2e.core.k8s_client import K8sClient
 from tests.e2e.core.osac_cli import OsacCLI
 from tests.e2e.core.runner import env
 
-DEFAULT_IT_CORES: int = 2
+DEFAULT_IT_VCPUS: int = 2
 DEFAULT_IT_MEMORY_GIB: int = 4
 
 # Shared DiskImage source for CLI-based ComputeInstance scaffolding. Pinned (not
@@ -89,27 +89,9 @@ def default_networking(grpc: GRPCClient, k8s_hub_client: K8sClient, test_run_id:
             "subnet_id": subnet_id,
             "subnet_cr_name": subnet_cr_name,
         }
-    except Exception:
-        # If setup fails, cleanup any resources that were created
-        print(f"\nSetup failed, cleaning up partial resources: {test_run_id}")
-        if subnet_id and subnet_cr_name:
-            try:
-                grpc.delete_subnet(subnet_id=subnet_id)
-            except Exception as e:
-                print(f"WARNING: Failed to cleanup subnet {subnet_id}: {e}")
-        if vn_id and vn_cr_name:
-            try:
-                grpc.delete_virtual_network(vn_id=vn_id)
-            except Exception as e:
-                print(f"WARNING: Failed to cleanup virtual network {vn_id}: {e}")
-        raise  # Re-raise original exception
     finally:
-        # Normal cleanup runs regardless of setup success/failure
-        # Only attempt cleanup if resources were successfully created
-        if vn_id and vn_cr_name and subnet_id and subnet_cr_name:
-            print(f"\nCleaning up test networking resources: {test_run_id}")
-
-            # Delete subnet first
+        print(f"\nCleaning up test networking resources: {test_run_id}")
+        if subnet_id and subnet_cr_name:
             try:
                 print(f"Deleting Subnet {subnet_id}...")
                 grpc.delete_subnet(subnet_id=subnet_id)
@@ -117,8 +99,7 @@ def default_networking(grpc: GRPCClient, k8s_hub_client: K8sClient, test_run_id:
                 print(f"Subnet {subnet_id} deleted")
             except Exception as e:
                 print(f"WARNING: Failed to delete subnet {subnet_id}: {e}")
-
-            # Delete virtual network
+        if vn_id and vn_cr_name:
             try:
                 print(f"Deleting VirtualNetwork {vn_id}...")
                 grpc.delete_virtual_network(vn_id=vn_id)
@@ -145,7 +126,7 @@ def default_instance_type(private_grpc: GRPCClient, test_run_id: str) -> Iterato
     """Create a default ACTIVE instance type for VM tests; clean up after."""
     it_name = f"e2e-default-it-{test_run_id}"
     private_grpc.create_instance_type(
-        name=it_name, cores=DEFAULT_IT_CORES, memory_gib=DEFAULT_IT_MEMORY_GIB, description="Default E2E instance type"
+        name=it_name, vcpus=DEFAULT_IT_VCPUS, memory_gib=DEFAULT_IT_MEMORY_GIB, description="Default E2E instance type"
     )
     yield it_name
     try:

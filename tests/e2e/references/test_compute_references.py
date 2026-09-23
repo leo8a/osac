@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import subprocess
 from collections.abc import Generator
@@ -31,7 +32,7 @@ def compute_template() -> str:
 def ref_instance_type(private_grpc: GRPCClient) -> Generator[str, None, None]:
     tag = uuid4().hex[:8]
     name = f"ref-it-{tag}"
-    private_grpc.create_instance_type(name=name, cores=2, memory_gib=4)
+    private_grpc.create_instance_type(name=name, vcpus=2, memory_gib=4)
     yield name
     try:
         private_grpc.delete_instance_type(name=name)
@@ -43,18 +44,18 @@ def ref_instance_type(private_grpc: GRPCClient) -> Generator[str, None, None]:
 def ref_ci_catalog_item(private_grpc: GRPCClient, compute_template: str) -> Generator[str, None, None]:
     tag = uuid4().hex[:8]
     name = f"ref-ci-cat-{tag}"
-    cat_id = private_grpc.create_compute_instance_catalog_item(name=name, template=compute_template)
+    cat_id = private_grpc.create_compute_instance_catalog_item(name=name, template=compute_template, api=PRIVATE_API)
     yield cat_id
     try:
-        private_grpc.delete_compute_instance_catalog_item(catalog_item_id=cat_id)
+        private_grpc.delete_compute_instance_catalog_item(catalog_item_id=cat_id, api=PRIVATE_API)
     except subprocess.CalledProcessError:
         logger.warning("Failed to cleanup catalog item %s", cat_id)
 
 
 @pytest.fixture(scope="module")
 def ref_disk_image(grpc: GRPCClient) -> Generator[str, None, None]:
-    # Provider-admin (grpc) DiskImages are globally visible, so this single fixture also
-    # satisfies tenant-scoped creates (e.g. the cross-tenant test's jwt_grpc_tenant1).
+    # Both grpc and jwt_grpc_tenant1 use tenant1, so this tenant-owned image is visible
+    # to the reference tests that create compute instances with either client.
     tag = uuid4().hex[:8]
     name = f"ref-di-{tag}"
     di_id = grpc.create_disk_image(name=name, source_ref="quay.io/containerdisks/fedora:41")
@@ -78,18 +79,17 @@ def _ci_create_data(
         "object": {
             "metadata": {"name": name},
             "spec": {
-                "catalog_item": {"name": cat_item_name},
-                "instance_type": {"name": instance_type},
+                "catalog_item": {"name": cat_item_name, "shared": True},
+                "instance_type": {"name": instance_type, "shared": True},
                 "disk_image": {"name": disk_image},
                 "boot_disk": {"storage_tier": {"name": storage_tier}},
-                "network_attachments": [
-                    {"subnet": {"name": subnet_name}, "security_groups": [{"name": sg_name}]}
-                ],
+                "network_attachments": [{"subnet": {"name": subnet_name}, "security_groups": [{"name": sg_name}]}],
             },
         }
     }
 
 
+@pytest.mark.requires_vmaas
 class TestComputeReferences:
     """OSAC-3100: Compute resource reference tests."""
 
@@ -209,8 +209,8 @@ class TestComputeReferences:
                     "object": {
                         "metadata": {"name": f"ref-ci-bad-sg-{tag}"},
                         "spec": {
-                            "catalog_item": {"name": cat_item_name},
-                            "instance_type": {"name": ref_instance_type},
+                            "catalog_item": {"name": cat_item_name, "shared": True},
+                            "instance_type": {"name": ref_instance_type, "shared": True},
                             "disk_image": {"name": ref_disk_image},
                             "boot_disk": {"storage_tier": {"name": default_storage_tier}},
                             "network_attachments": [
@@ -238,7 +238,9 @@ class TestComputeReferences:
     ):
         tag = uuid4().hex[:8]
         cat_name = f"ref-xt-cat-{tag}"
-        cat_id = private_grpc.create_compute_instance_catalog_item(name=cat_name, template=compute_template)
+        cat_id = private_grpc.create_compute_instance_catalog_item(
+            name=cat_name, template=compute_template, api=PRIVATE_API
+        )
         ci_id = None
         try:
             response: dict[str, Any] = jwt_grpc_tenant1.call(
@@ -265,7 +267,7 @@ class TestComputeReferences:
                 except subprocess.CalledProcessError:
                     logger.warning("Failed to cleanup compute instance %s", ci_id)
             try:
-                private_grpc.delete_compute_instance_catalog_item(catalog_item_id=cat_id)
+                private_grpc.delete_compute_instance_catalog_item(catalog_item_id=cat_id, api=PRIVATE_API)
             except subprocess.CalledProcessError:
                 logger.warning("Failed to cleanup cross-tenant catalog item %s", cat_id)
 
@@ -274,8 +276,8 @@ class TestComputeReferences:
         active_name = f"ref-it-active-{tag}"
         deprecated_name = f"ref-it-depr-{tag}"
 
-        active_id = private_grpc.create_instance_type(name=active_name, cores=2, memory_gib=4)
-        private_grpc.create_instance_type(name=deprecated_name, cores=2, memory_gib=4)
+        active_id = private_grpc.create_instance_type(name=active_name, vcpus=2, memory_gib=4)
+        private_grpc.create_instance_type(name=deprecated_name, vcpus=2, memory_gib=4)
         try:
             private_grpc.call(
                 service=f"{PRIVATE_API}.InstanceTypes/Update",
@@ -305,3 +307,60 @@ class TestComputeReferences:
                 private_grpc.delete_instance_type(name=active_name)
             except subprocess.CalledProcessError:
                 logger.warning("Failed to cleanup active instance type %s", active_name)
+
+    def test_compute_instance_user_data_secret_by_name(
+        self,
+        grpc: GRPCClient,
+        k8s_hub_client: K8sClient,
+        ref_subnet: dict[str, str],
+        ref_security_group: dict[str, str],
+        ref_ci_catalog_item: str,
+        ref_instance_type: str,
+        ref_disk_image: str,
+        default_storage_tier: str,
+    ):
+        tag = uuid4().hex[:8]
+        secret_name = f"ref-user-data-{tag}"
+        secret_response: dict[str, Any] = grpc.call(
+            service=f"{PUBLIC_API}.Secrets/Create",
+            data={
+                "object": {
+                    "metadata": {"name": secret_name},
+                    "type": "SECRET_TYPE_USER_DATA",
+                    "data": {"userdata": base64.b64encode(b"#cloud-config\n").decode()},
+                }
+            },
+        )
+        secret_id = secret_response["object"]["id"]
+        ci_id: str | None = None
+
+        try:
+            cat_item = grpc.get_compute_instance_catalog_item(catalog_item_id=ref_ci_catalog_item)
+            data = _ci_create_data(
+                f"ref-ci-secret-{tag}",
+                cat_item["object"]["metadata"]["name"],
+                ref_subnet["name"],
+                ref_security_group["name"],
+                ref_instance_type,
+                ref_disk_image,
+                default_storage_tier,
+            )
+            data["object"]["spec"]["user_data_secret"] = {"name": secret_name}
+
+            response: dict[str, Any] = grpc.call(service=f"{PUBLIC_API}.ComputeInstances/Create", data=data)
+            ci_id = response["object"]["id"]
+            secret_ref = response["object"]["spec"].get(
+                "user_data_secret", response["object"]["spec"].get("userDataSecret", {})
+            )
+            assert secret_ref.get("name") == secret_name
+            assert secret_ref.get("id") == secret_id
+        finally:
+            if ci_id:
+                try:
+                    grpc.delete_compute_instance(ci_id=ci_id)
+                except subprocess.CalledProcessError:
+                    logger.warning("Failed to cleanup compute instance %s", ci_id)
+            try:
+                grpc.call(service=f"{PUBLIC_API}.Secrets/Delete", data={"id": secret_id})
+            except subprocess.CalledProcessError:
+                logger.warning("Failed to cleanup secret %s", secret_id)

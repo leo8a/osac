@@ -23,11 +23,12 @@ import (
 	"go.uber.org/mock/gomock"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("User data secret validation", func() {
@@ -46,6 +47,7 @@ var _ = Describe("User data secret validation", func() {
 		name := fmt.Sprintf("userdata-%s", uuid.NewString()[:8])
 		response, err := secretsDao.Create().SetObject(privatev1.Secret_builder{
 			Metadata: privatev1.Metadata_builder{Name: name, Tenant: testTenant}.Build(),
+			Type:     privatev1.SecretType_SECRET_TYPE_USER_DATA,
 			Data:     data,
 		}.Build()).Do(ctx)
 		Expect(err).ToNot(HaveOccurred())
@@ -63,6 +65,21 @@ var _ = Describe("User data secret validation", func() {
 			Expect(resolved.GetId()).To(Equal(secret.GetId()))
 			Expect(resolved.GetName()).To(Equal(secret.GetMetadata().GetName()))
 		}
+	})
+
+	It("rejects a Secret that is not explicitly typed as user data", func() {
+		name := fmt.Sprintf("opaque-%s", uuid.NewString()[:8])
+		created, err := secretsDao.Create().SetObject(privatev1.Secret_builder{
+			Metadata: privatev1.Metadata_builder{Name: name, Tenant: testTenant}.Build(),
+			Type:     privatev1.SecretType_SECRET_TYPE_OPAQUE,
+			Data:     map[string][]byte{userDataSecretDataKey: []byte("#cloud-config")},
+		}.Build()).Do(ctx)
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = validateUserDataSecret(ctx, logger, secretsDao, nil,
+			privatev1.SecretLocalReference_builder{Id: created.GetObject().GetId()}.Build())
+		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("expected SECRET_TYPE_USER_DATA"))
 	})
 
 	It("rejects a Secret without a non-empty userdata entry", func() {
@@ -95,6 +112,7 @@ var _ = Describe("User data secret validation", func() {
 		name := fmt.Sprintf("shared-userdata-%s", uuid.NewString()[:8])
 		created, err := secretsDao.Create().SetObject(privatev1.Secret_builder{
 			Metadata: privatev1.Metadata_builder{Name: name, Tenant: auth.SharedTenant}.Build(),
+			Type:     privatev1.SecretType_SECRET_TYPE_USER_DATA,
 			Data:     map[string][]byte{userDataSecretDataKey: []byte("#cloud-config")},
 		}.Build()).Do(ctx)
 		Expect(err).ToNot(HaveOccurred())
@@ -126,6 +144,7 @@ var _ = Describe("User data secret validation", func() {
 				Name:   fmt.Sprintf("other-userdata-%s", uuid.NewString()[:8]),
 				Tenant: otherTenant,
 			}.Build(),
+			Type: privatev1.SecretType_SECRET_TYPE_USER_DATA,
 			Data: map[string][]byte{userDataSecretDataKey: []byte("#cloud-config")},
 		}.Build()).Do(ctx)
 		Expect(err).ToNot(HaveOccurred())
@@ -156,6 +175,7 @@ var _ = Describe("User data secret validation", func() {
 				Tenant: testTenant,
 			}.Build(),
 			Backend: privatev1.SecretBackend_SECRET_BACKEND_VAULT,
+			Type:    privatev1.SecretType_SECRET_TYPE_USER_DATA,
 		}.Build()).Do(ctx)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -183,7 +203,9 @@ var _ = Describe("User data secret validation", func() {
 			}.Build(),
 			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.user_data_secret"}},
 		}.Build()
-		err = server.validateUserDataMutualExclusionForUpdate(ctx, request)
+		mergedSpec := proto.Clone(created.GetObject().GetSpec()).(*privatev1.ComputeInstanceSpec)
+		mergedSpec.SetUserDataSecret(request.GetObject().GetSpec().GetUserDataSecret())
+		err = server.validateAndResolveUserDataSecret(ctx, mergedSpec, false)
 		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
 		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
 	})
@@ -207,8 +229,13 @@ var _ = Describe("User data secret validation", func() {
 			}.Build(),
 			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.user_data", "spec.user_data_secret"}},
 		}.Build()
-		Expect(server.validateUserDataMutualExclusionForUpdate(ctx, request)).To(Succeed())
-		Expect(server.validateTemplateImmutability(ctx, request)).To(Succeed())
+		Expect(server.validateAndResolveUserDataSecret(ctx, request.GetObject().GetSpec(), false)).To(Succeed())
+		candidate := proto.Clone(created.GetObject()).(*privatev1.ComputeInstance)
+		candidate.GetSpec().ClearUserData()
+		candidate.GetSpec().SetUserDataSecret(request.GetObject().GetSpec().GetUserDataSecret())
+		Expect(validateComputeInstanceImmutability(
+			created.GetObject(), candidate, request.GetUpdateMask(),
+		)).To(Succeed())
 	})
 
 	It("rejects changing an existing Compute Secret reference", func() {
@@ -232,7 +259,9 @@ var _ = Describe("User data secret validation", func() {
 			}.Build(),
 			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.user_data_secret"}},
 		}.Build()
-		err = server.validateTemplateImmutability(ctx, request)
+		candidate := proto.Clone(created.GetObject()).(*privatev1.ComputeInstance)
+		candidate.GetSpec().SetUserDataSecret(request.GetObject().GetSpec().GetUserDataSecret())
+		err = validateComputeInstanceImmutability(created.GetObject(), candidate, request.GetUpdateMask())
 		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
 		Expect(err.Error()).To(ContainSubstring("user_data_secret is immutable"))
 	})
@@ -241,10 +270,10 @@ var _ = Describe("User data secret validation", func() {
 		computeServer, err := NewPrivateComputeInstancesServer().SetLogger(logger).
 			SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
 		Expect(err).ToNot(HaveOccurred())
-		err = computeServer.validateUserDataMutualExclusion(privatev1.ComputeInstanceSpec_builder{
+		err = computeServer.validateAndResolveUserDataSecret(ctx, privatev1.ComputeInstanceSpec_builder{
 			UserData:       new("inline"),
 			UserDataSecret: privatev1.SecretLocalReference_builder{Id: "secret"}.Build(),
-		}.Build())
+		}.Build(), false)
 		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
 	})
 
@@ -267,8 +296,13 @@ var _ = Describe("User data secret validation", func() {
 			}.Build(),
 			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.user_data", "spec.user_data_secret"}},
 		}.Build()
-		Expect(server.validateUserDataMutualExclusionForUpdate(ctx, request)).To(Succeed())
-		Expect(server.validateImmutability(ctx, request)).To(Succeed())
+		Expect(server.validateAndResolveUserDataSecret(ctx, request.GetObject().GetSpec(), false)).To(Succeed())
+		candidate := proto.Clone(created.GetObject()).(*privatev1.BareMetalInstance)
+		candidate.GetSpec().ClearUserData()
+		candidate.GetSpec().SetUserDataSecret(request.GetObject().GetSpec().GetUserDataSecret())
+		Expect(validateBareMetalImmutability(
+			created.GetObject(), candidate, request.GetUpdateMask(),
+		)).To(Succeed())
 	})
 
 	It("allows a BareMetal Secret reference to be assigned when no user data exists", func() {
@@ -290,7 +324,11 @@ var _ = Describe("User data secret validation", func() {
 			}.Build(),
 			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.user_data_secret"}},
 		}.Build()
-		Expect(server.validateUserDataMutualExclusionForUpdate(ctx, request)).To(Succeed())
-		Expect(server.validateImmutability(ctx, request)).To(Succeed())
+		Expect(server.validateAndResolveUserDataSecret(ctx, request.GetObject().GetSpec(), false)).To(Succeed())
+		candidate := proto.Clone(created.GetObject()).(*privatev1.BareMetalInstance)
+		candidate.GetSpec().SetUserDataSecret(request.GetObject().GetSpec().GetUserDataSecret())
+		Expect(validateBareMetalImmutability(
+			created.GetObject(), candidate, request.GetUpdateMask(),
+		)).To(Succeed())
 	})
 })

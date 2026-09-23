@@ -13,9 +13,9 @@ language governing permissions and limitations under the License.
 
 package cluster
 
-//go:generate mockgen -source=../../api/osac/private/v1/clusters_service_grpc.pb.go -destination=clusters_client_mock.go -package=cluster ClustersClient
-//go:generate mockgen -source=../../api/osac/private/v1/cluster_versions_service_grpc.pb.go -destination=cluster_versions_client_mock.go -package=cluster ClusterVersionsClient
-//go:generate mockgen -source=../../api/osac/private/v1/secrets_service_grpc.pb.go -destination=secrets_client_mock.go -package=cluster SecretsClient
+//go:generate mockgen -destination=clusters_client_mock.go -package=cluster github.com/osac-project/osac/proto/gen/osac/private/v1 ClustersClient
+//go:generate mockgen -destination=cluster_versions_client_mock.go -package=cluster github.com/osac-project/osac/proto/gen/osac/private/v1 ClusterVersionsClient
+//go:generate mockgen -destination=secrets_client_mock.go -package=cluster github.com/osac-project/osac/proto/gen/osac/private/v1 SecretsClient
 
 import (
 	"context"
@@ -38,7 +38,6 @@ import (
 
 	osacv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/annotations"
@@ -46,6 +45,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/kubernetes/labels"
 	"github.com/osac-project/osac/fulfillment-service/internal/masks"
 	"github.com/osac-project/osac/fulfillment-service/internal/utils"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 // objectPrefix is the prefix that will be used in the `generateName` field of the resources created in the hub.
@@ -712,7 +712,8 @@ func (t *task) ensureClusterSecrets(ctx context.Context, order *osacv1alpha1.Clu
 		}
 		if found && kubeconfigSecretName != "" {
 			kubeconfigID, err := t.createHubSecret(ctx, clusterName+"-kubeconfig", "cluster-kubeconfig",
-				clusterRef.Namespace, kubeconfigSecretName, "kubeconfig")
+				clusterRef.Namespace, kubeconfigSecretName, "kubeconfig",
+				privatev1.SecretType_SECRET_TYPE_KUBECONFIG)
 			if err != nil {
 				return err
 			}
@@ -730,7 +731,8 @@ func (t *task) ensureClusterSecrets(ctx context.Context, order *osacv1alpha1.Clu
 		}
 		if found && passwordSecretName != "" {
 			passwordID, err := t.createHubSecret(ctx, clusterName+"-password", "cluster-password",
-				clusterRef.Namespace, passwordSecretName, "password")
+				clusterRef.Namespace, passwordSecretName, "password",
+				privatev1.SecretType_SECRET_TYPE_OPAQUE)
 			if err != nil {
 				return err
 			}
@@ -761,7 +763,7 @@ func (t *task) getHostedCluster(ctx context.Context, namespace, name string) (*u
 }
 
 func (t *task) createHubSecret(ctx context.Context, secretName, secretTypeLabel,
-	k8sNamespace, k8sSecretName, k8sKey string) (string, error) {
+	k8sNamespace, k8sSecretName, k8sKey string, secretType privatev1.SecretType) (string, error) {
 	secret := privatev1.Secret_builder{
 		Metadata: privatev1.Metadata_builder{
 			Name:    secretName,
@@ -773,6 +775,7 @@ func (t *task) createHubSecret(ctx context.Context, secretName, secretTypeLabel,
 			Creator: systemCreator,
 		}.Build(),
 		Backend: privatev1.SecretBackend_SECRET_BACKEND_HUB,
+		Type:    secretType,
 		Coordinates: map[string]string{
 			coordinateHubID:      t.hubId,
 			coordinateNamespace:  k8sNamespace,

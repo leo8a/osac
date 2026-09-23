@@ -23,6 +23,7 @@ import (
 
 	hypershiftv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -34,8 +35,8 @@ import (
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 
 	ckv1alpha1 "github.com/osac-project/osac/osac-operator/api/v1alpha1"
-	privatev1 "github.com/osac-project/osac/osac-operator/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/osac-operator/internal/controller/feedback"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 // FeedbackReconciler sends updates to the fulfillment service.
@@ -100,6 +101,11 @@ func newClusterOrderFeedbackBridge(hubClient clnt.Client, clustersClient private
 		Save: func(ctx context.Context, remote *privatev1.Cluster) error {
 			_, err := clustersClient.Update(ctx, privatev1.ClustersUpdateRequest_builder{
 				Object: remote,
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{
+					"status.conditions", feedbackStatusStatePath, "status.api_url", "status.console_url", "status.api_endpoint",
+					"status.ingress_endpoint", feedbackStatusStateTransitionTimePath, "status.kubeconfig_secret", "status.password_secret", "status.hub",
+					"status.node_sets",
+				}},
 			}.Build())
 			return err
 		},

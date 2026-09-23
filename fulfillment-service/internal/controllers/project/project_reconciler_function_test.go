@@ -15,7 +15,6 @@ package project
 
 import (
 	"context"
-	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -25,9 +24,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
 	"github.com/osac-project/osac/fulfillment-service/internal/idp"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 var _ = Describe("Finalizer Management", func() {
@@ -1008,10 +1007,10 @@ var _ = Describe("Deletion Cleanup", func() {
 			List(gomock.Any(), gomock.Any()).
 			Return(&privatev1.ProjectMembershipsListResponse{}, nil)
 
-		// Group already deleted — DeleteProjectGroups swallows "not found" internally
+		// Group already deleted — DeleteProjectGroups swallows ErrNotFound internally
 		mockIdpClient.EXPECT().
 			GetGroupIDByPath(gomock.Any(), "acme", "/test-project").
-			Return("", fmt.Errorf("organization group not found: /test-project"))
+			Return("", &idp.ErrNotFound{Kind: "group", Name: "test-project"})
 
 		task := &task{
 			r:       functionObj,
@@ -1182,10 +1181,10 @@ var _ = Describe("Deletion Cleanup", func() {
 		// Default project groups live at /system:viewers and /system:managers
 		mockIdpClient.EXPECT().
 			GetGroupIDByPath(gomock.Any(), "acme", "/system:viewers").
-			Return("", fmt.Errorf("organization group not found: /system:viewers"))
+			Return("", &idp.ErrNotFound{Kind: "group", Name: "system:viewers"})
 		mockIdpClient.EXPECT().
 			GetGroupIDByPath(gomock.Any(), "acme", "/system:managers").
-			Return("", fmt.Errorf("organization group not found: /system:managers"))
+			Return("", &idp.ErrNotFound{Kind: "group", Name: "system:managers"})
 
 		// Root project triggers tenant signal after finalizer removal
 		mockTenantsClient.EXPECT().

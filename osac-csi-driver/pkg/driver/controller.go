@@ -5,11 +5,12 @@ import (
 	"time"
 
 	csi "github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/osac-project/osac/osac-csi-driver/pkg/fulfillment"
-	"github.com/osac-project/osac/osac-csi-driver/pkg/proxy"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
+
+	"github.com/osac-project/osac/osac-csi-driver/pkg/fulfillment"
+	"github.com/osac-project/osac/osac-csi-driver/pkg/proxy"
 )
 
 const (
@@ -31,7 +32,7 @@ type ControllerServer struct {
 	csi.UnimplementedControllerServer
 	volumes  fulfillment.VolumeClient
 	proxyMgr *proxy.Manager
-	// vendorControllers maps an "osac.backend" name to the gRPC endpoint of that
+	// vendorControllers maps an "osac.backend" provider to the gRPC endpoint of that
 	// vendor's CSI controller, used to proxy publish/unpublish operations.
 	vendorControllers map[string]string
 	clusterID         string
@@ -41,7 +42,7 @@ type ControllerServer struct {
 }
 
 // NewControllerServer creates a new CSI controller server. vendorControllers maps
-// an "osac.backend" name to the gRPC endpoint of that vendor's CSI controller.
+// an "osac.backend" provider to the gRPC endpoint of that vendor's CSI controller.
 func NewControllerServer(vc fulfillment.VolumeClient, proxyMgr *proxy.Manager, vendorControllers map[string]string, clusterID string) *ControllerServer {
 	return &ControllerServer{
 		volumes:             vc,
@@ -74,6 +75,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 	if tenant == "" {
 		tenant = "default"
 	}
+	project := req.GetParameters()["project"]
 
 	var sizeBytes int64
 	if cr := req.GetCapacityRange(); cr != nil {
@@ -92,6 +94,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 
 	params := fulfillment.CreateVolumeParams{
 		Tenant:     tenant,
+		Project:    project,
 		Tier:       tier,
 		SizeBytes:  sizeBytes,
 		AccessMode: accessMode,
@@ -104,7 +107,7 @@ func (c *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolu
 		st, ok := status.FromError(err)
 		if ok && st.Code() == codes.AlreadyExists {
 			klog.Infof("Volume %q already exists, resolving via ListVolumes", req.GetName())
-			vol, err = c.resolveExistingVolume(ctx, req.GetName())
+			vol, err = c.resolveExistingVolume(ctx, req.GetName(), tenant, project)
 			if err != nil {
 				return nil, err
 			}
@@ -398,8 +401,12 @@ func (c *ControllerServer) ControllerGetCapabilities(_ context.Context, _ *csi.C
 	}, nil
 }
 
-func (c *ControllerServer) resolveExistingVolume(ctx context.Context, name string) (*fulfillment.VolumeInfo, error) {
-	volumes, err := c.volumes.ListVolumes(ctx, fulfillment.ListVolumesParams{NameFilter: name})
+func (c *ControllerServer) resolveExistingVolume(ctx context.Context, name, tenant, project string) (*fulfillment.VolumeInfo, error) {
+	volumes, err := c.volumes.ListVolumes(ctx, fulfillment.ListVolumesParams{
+		NameFilter:    name,
+		TenantFilter:  &tenant,
+		ProjectFilter: &project,
+	})
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to list volumes: %v", err)
 	}
@@ -408,8 +415,8 @@ func (c *ControllerServer) resolveExistingVolume(ctx context.Context, name strin
 			return v, nil
 		}
 	}
-	return nil, status.Errorf(codes.Internal,
-		"volume %q reported as existing but not found via list", name)
+	return nil, status.Errorf(codes.AlreadyExists,
+		"volume %q already exists with a different project", name)
 }
 
 func capacityCompatible(volBytes int64, cr *csi.CapacityRange) bool {

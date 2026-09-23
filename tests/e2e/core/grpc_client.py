@@ -278,6 +278,9 @@ class GRPCClient:
     def get_external_ip(self, *, external_ip_id: str) -> dict[str, Any]:
         return self.call(service=f"{PUBLIC_API}.ExternalIPs/Get", data={"id": external_ip_id})
 
+    def get_private_external_ip(self, *, external_ip_id: str) -> dict[str, Any]:
+        return self.call(service=f"{PRIVATE_API}.ExternalIPs/Get", data={"id": external_ip_id})
+
     def list_external_ip_ids(self) -> list[str]:
         response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.ExternalIPs/List")
         return [item["id"] for item in response.get("items", [])]
@@ -324,24 +327,33 @@ class GRPCClient:
     # ClusterCatalogItem operations
 
     def create_cluster_catalog_item(
-        self, *, name: str, template: str, published: bool = True, field_definitions: list[dict[str, Any]] | None = None
+        self,
+        *,
+        name: str,
+        template: str,
+        published: bool = True,
+        fields: dict[str, Any] | None = None,
+        api: str = PUBLIC_API,
     ) -> str:
         obj: dict[str, Any] = {
             "metadata": {"name": name},
             "title": name,
-            "template": {"name": template},
+            "template": {"name": template, "shared": True},
             "published": published,
         }
-        if field_definitions is not None:
-            obj["field_definitions"] = field_definitions
-        response: dict[str, Any] = self.call(service=f"{PRIVATE_API}.ClusterCatalogItems/Create", data={"object": obj})
+        if fields is not None:
+            obj["fields"] = fields
+        response: dict[str, Any] = self.call(service=f"{api}.ClusterCatalogItems/Create", data={"object": obj})
         return response["object"]["id"]
 
     def get_cluster_catalog_item(self, *, catalog_item_id: str) -> dict[str, Any]:
         return self.call(service=f"{PUBLIC_API}.ClusterCatalogItems/Get", data={"id": catalog_item_id})
 
-    def list_cluster_catalog_item_ids(self) -> list[str]:
-        response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.ClusterCatalogItems/List")
+    def list_cluster_catalog_item_ids(self, *, published_only: bool = False) -> list[str]:
+        response: dict[str, Any] = self.call(
+            service=f"{PUBLIC_API}.ClusterCatalogItems/List",
+            data={"filter": "this.published"} if published_only else {},
+        )
         return [item["id"] for item in response.get("items", [])]
 
     def update_cluster_catalog_item(self, *, catalog_item_id: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -349,34 +361,41 @@ class GRPCClient:
             raise ValueError("update_cluster_catalog_item requires at least one field to update")
         obj: dict[str, Any] = {"id": catalog_item_id, **fields}
         data: dict[str, Any] = {"object": obj, "update_mask": {"paths": list(fields.keys())}}
-        return self.call(service=f"{PRIVATE_API}.ClusterCatalogItems/Update", data=data)
+        return self.call(service=f"{PUBLIC_API}.ClusterCatalogItems/Update", data=data)
 
-    def delete_cluster_catalog_item(self, *, catalog_item_id: str) -> None:
-        self.call(service=f"{PRIVATE_API}.ClusterCatalogItems/Delete", data={"id": catalog_item_id})
+    def delete_cluster_catalog_item(self, *, catalog_item_id: str, api: str = PUBLIC_API) -> None:
+        self.call(service=f"{api}.ClusterCatalogItems/Delete", data={"id": catalog_item_id})
 
     # ComputeInstanceCatalogItem operations
 
     def create_compute_instance_catalog_item(
-        self, *, name: str, template: str, published: bool = True, field_definitions: list[dict[str, Any]] | None = None
+        self,
+        *,
+        name: str,
+        template: str,
+        published: bool = True,
+        fields: dict[str, Any] | None = None,
+        api: str = PUBLIC_API,
     ) -> str:
         obj: dict[str, Any] = {
             "metadata": {"name": name},
             "title": name,
-            "template": {"name": template},
+            "template": {"name": template, "shared": True},
             "published": published,
         }
-        if field_definitions is not None:
-            obj["field_definitions"] = field_definitions
-        response: dict[str, Any] = self.call(
-            service=f"{PRIVATE_API}.ComputeInstanceCatalogItems/Create", data={"object": obj}
-        )
+        if fields is not None:
+            obj["fields"] = fields
+        response: dict[str, Any] = self.call(service=f"{api}.ComputeInstanceCatalogItems/Create", data={"object": obj})
         return response["object"]["id"]
 
     def get_compute_instance_catalog_item(self, *, catalog_item_id: str) -> dict[str, Any]:
         return self.call(service=f"{PUBLIC_API}.ComputeInstanceCatalogItems/Get", data={"id": catalog_item_id})
 
-    def list_compute_instance_catalog_item_ids(self) -> list[str]:
-        response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.ComputeInstanceCatalogItems/List")
+    def list_compute_instance_catalog_item_ids(self, *, published_only: bool = False) -> list[str]:
+        response: dict[str, Any] = self.call(
+            service=f"{PUBLIC_API}.ComputeInstanceCatalogItems/List",
+            data={"filter": "this.published"} if published_only else {},
+        )
         return [item["id"] for item in response.get("items", [])]
 
     def update_compute_instance_catalog_item(self, *, catalog_item_id: str, **fields: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -384,17 +403,17 @@ class GRPCClient:
             raise ValueError("update_compute_instance_catalog_item requires at least one field to update")
         obj: dict[str, Any] = {"id": catalog_item_id, **fields}
         data: dict[str, Any] = {"object": obj, "update_mask": {"paths": list(fields.keys())}}
-        return self.call(service=f"{PRIVATE_API}.ComputeInstanceCatalogItems/Update", data=data)
+        return self.call(service=f"{PUBLIC_API}.ComputeInstanceCatalogItems/Update", data=data)
 
-    def delete_compute_instance_catalog_item(self, *, catalog_item_id: str) -> None:
-        self.call(service=f"{PRIVATE_API}.ComputeInstanceCatalogItems/Delete", data={"id": catalog_item_id})
+    def delete_compute_instance_catalog_item(self, *, catalog_item_id: str, api: str = PUBLIC_API) -> None:
+        self.call(service=f"{api}.ComputeInstanceCatalogItems/Delete", data={"id": catalog_item_id})
 
     # InstanceType operations (private API only)
 
     def create_instance_type(
-        self, *, name: str, cores: int, memory_gib: int, description: str = "", gpu: dict[str, Any] | None = None
+        self, *, name: str, vcpus: int, memory_gib: int, description: str = "", gpu: dict[str, Any] | None = None
     ) -> str:
-        spec: dict[str, Any] = {"cores": cores, "memory_gib": memory_gib, "description": description}
+        spec: dict[str, Any] = {"vcpus": vcpus, "memory_gib": memory_gib, "description": description}
         if gpu is not None:
             spec["gpu"] = gpu
         response: dict[str, Any] = self.call(
@@ -517,7 +536,7 @@ class GRPCClient:
     def delete_baremetal_instance(self, *, bmi_id: str) -> None:
         self.call(service=f"{PUBLIC_API}.BareMetalInstances/Delete", data={"id": bmi_id})
 
-    # BareMetalInstanceCatalogItem operations (private API for admin setup)
+    # BareMetalInstanceCatalogItem operations
 
     def create_baremetal_instance_catalog_item(
         self,
@@ -526,31 +545,32 @@ class GRPCClient:
         title: str,
         description: str,
         template: str,
-        field_definitions: list[dict[str, Any]] | None = None,
+        fields: dict[str, Any] | None = None,
+        api: str = PUBLIC_API,
     ) -> str:
         """Create a published BareMetalInstanceCatalogItem.
 
-        ``template`` is sent as a typed reference ``{"name": ...}`` (OSAC-1330),
+        ``template`` is sent as a typed shared reference ``{"name": ..., "shared": true}`` (OSAC-1330),
         matching Cluster/ComputeInstance catalog item creates.
         """
         obj: dict[str, Any] = {
             "metadata": {"name": name},
             "title": title,
             "description": description,
-            "template": {"name": template},
+            "template": {"name": template, "shared": True},
             "published": True,
         }
-        if field_definitions is not None:
-            obj["field_definitions"] = field_definitions
+        if fields is not None:
+            obj["fields"] = fields
         response: dict[str, Any] = self.call(
-            service=f"{PRIVATE_API}.BareMetalInstanceCatalogItems/Create", data={"object": obj}
+            service=f"{api}.BareMetalInstanceCatalogItems/Create", data={"object": obj}
         )
         return response["object"]["id"]
 
-    def delete_baremetal_instance_catalog_item(self, *, item_id: str) -> None:
-        self.call(service=f"{PRIVATE_API}.BareMetalInstanceCatalogItems/Delete", data={"id": item_id})
+    def delete_baremetal_instance_catalog_item(self, *, item_id: str, api: str = PUBLIC_API) -> None:
+        self.call(service=f"{api}.BareMetalInstanceCatalogItems/Delete", data={"id": item_id})
 
-    # DiskImage operations (public API)
+    # DiskImage operations
 
     def create_disk_image(
         self,
@@ -560,6 +580,7 @@ class GRPCClient:
         source_type: str = "SOURCE_TYPE_REGISTRY",
         guest_os_family: str = "GUEST_OS_FAMILY_LINUX",
         name: str | None = None,
+        api: str = PUBLIC_API,
     ) -> str:
         spec: dict[str, Any] = {
             "source_type": source_type,
@@ -570,7 +591,7 @@ class GRPCClient:
         obj: dict[str, Any] = {"spec": spec}
         if name is not None:
             obj["metadata"] = {"name": name}
-        response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.DiskImages/Create", data={"object": obj})
+        response: dict[str, Any] = self.call(service=f"{api}.DiskImages/Create", data={"object": obj})
         return response["object"]["id"]
 
     def get_disk_image(self, *, disk_image_id: str) -> dict[str, Any]:
@@ -581,17 +602,19 @@ class GRPCClient:
         response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.DiskImages/List", data=data)
         return [item["id"] for item in response.get("items", [])]
 
-    def update_disk_image_lifecycle(self, *, disk_image_id: str, lifecycle: str) -> dict[str, Any]:
+    def update_disk_image_lifecycle(
+        self, *, disk_image_id: str, lifecycle: str, api: str = PUBLIC_API
+    ) -> dict[str, Any]:
         return self.call(
-            service=f"{PUBLIC_API}.DiskImages/Update",
+            service=f"{api}.DiskImages/Update",
             data={
                 "object": {"id": disk_image_id, "spec": {"lifecycle": lifecycle}},
                 "updateMask": {"paths": ["spec.lifecycle"]},
             },
         )
 
-    def delete_disk_image(self, *, disk_image_id: str) -> None:
-        self.call(service=f"{PUBLIC_API}.DiskImages/Delete", data={"id": disk_image_id})
+    def delete_disk_image(self, *, disk_image_id: str, api: str = PUBLIC_API) -> None:
+        self.call(service=f"{api}.DiskImages/Delete", data={"id": disk_image_id})
 
     # ComputeInstance creation with explicit DiskImage (public API)
 
@@ -607,12 +630,12 @@ class GRPCClient:
     ) -> dict[str, Any]:
         attachments = [{"subnet": {"id": sid}} for sid in subnet_ids]
         spec: dict[str, Any] = {
-            "template": {"name": template},
+            "template": {"name": template, "shared": True},
             "disk_image": {"name": disk_image_name},
             "network_attachments": attachments,
         }
         if instance_type is not None:
-            spec["instance_type"] = {"name": instance_type}
+            spec["instance_type"] = {"name": instance_type, "shared": True}
         if boot_disk_storage_tier is not None:
             spec["boot_disk"] = {"storage_tier": {"name": boot_disk_storage_tier}}
         obj: dict[str, Any] = {"spec": spec}

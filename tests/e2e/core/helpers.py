@@ -4,6 +4,7 @@ import re
 import subprocess
 import time
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -14,6 +15,16 @@ from tests.e2e.core.runner import poll_until, run_unchecked
 _POOL_READY_STATE = "EXTERNAL_IP_POOL_STATE_READY"
 _BMI_RUNNING_RETRIES = 180
 _BMI_RUNNING_DELAY = 10
+
+
+def unique_name(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex[:8]}"
+
+
+def grpc_error_message(exc: subprocess.CalledProcessError) -> str:
+    combined = (exc.stderr or "") + (exc.stdout or "")
+    match = re.search(r"Message:\s*(.+)", combined)
+    return match.group(1).strip() if match else ""
 
 
 def assert_grpc_rejected(exc_info: pytest.ExceptionInfo[subprocess.CalledProcessError], code: str) -> None:
@@ -311,6 +322,60 @@ def wait_for_cluster_progressing(*, k8s: K8sClient, name: str) -> None:
     )
 
 
+def wait_for_cluster_order_event_reasons(
+    *, k8s: K8sClient, name: str, reasons: set[str], stop_reasons: set[str] | None = None
+) -> dict[str, dict[str, Any]]:
+    observed_events: dict[str, dict[str, Any]] = {}
+
+    def _observed_events() -> dict[str, dict[str, Any]]:
+        observed_events.update(
+            {event["reason"]: event for event in k8s.get_cluster_order_events(name=name) if event.get("reason")}
+        )
+        return observed_events
+
+    stop_reasons = stop_reasons or set()
+    return poll_until(
+        fn=_observed_events,
+        until=lambda observed: reasons.issubset(observed) or bool(stop_reasons & observed.keys()),
+        retries=480,
+        delay=15,
+        description=f"{name} ClusterOrder provisioning events",
+    )
+
+
+def assert_cluster_order_events(
+    *, events: dict[str, dict[str, Any]], expected: dict[str, tuple[str, str, str]]
+) -> None:
+    missing = set(expected) - set(events)
+    assert not missing, f"Missing ClusterOrder lifecycle events: {sorted(missing)}; observed: {sorted(events)}"
+    for reason, (event_type, action, message) in expected.items():
+        event = events[reason]
+        assert event.get("type") == event_type, f"Expected {event_type} event for {reason}: {event}"
+        assert event.get("action") == action, f"Expected {action} action for {reason}: {event}"
+        assert message in event.get("message", ""), f"Expected message for {reason}: {event}"
+
+
+def assert_cluster_order_lifecycle_events(*, k8s: K8sClient, name: str) -> None:
+    expected_events = {
+        "Created": ("Normal", "Created", "ClusterOrder created"),
+        "PreparingInfrastructure": ("Normal", "Provisioning", "Preparing Infrastructure"),
+        "ControlPlaneStarting": ("Normal", "Provisioning", "Control Plane Starting"),
+        "Ready": ("Normal", "Ready", "ClusterOrder is ready"),
+    }
+    if k8s.get_cluster_order_status(name=name).get("nodeSets"):
+        expected_events["WorkersJoining"] = ("Normal", "Provisioning", "Workers Joining")
+
+    events = {event["reason"]: event for event in k8s.get_cluster_order_events(name=name) if event.get("reason")}
+    assert_cluster_order_events(events=events, expected=expected_events)
+
+
+def assert_cluster_order_deleting_event(*, k8s: K8sClient, name: str) -> None:
+    events = wait_for_cluster_order_event_reasons(k8s=k8s, name=name, reasons={"Deleting"})
+    assert_cluster_order_events(
+        events=events, expected={"Deleting": ("Normal", "Deleting", "ClusterOrder entered deleting phase")}
+    )
+
+
 def wait_for_cluster_ready(*, k8s: K8sClient, name: str) -> None:
     # Must stay safely above osac-aap's own wait_for_clusteroperators_retries
     # budget (60 min) plus earlier steps in the same AAP job (create hosted
@@ -346,7 +411,7 @@ def wait_for_cluster_deletion(*, k8s: K8sClient, name: str) -> None:
         _force_cleanup_agentcluster_finalizers(k8s=k8s, name=name)
         _force_cleanup_agent_labels(k8s=k8s, name=name)
         _force_cleanup_machine_preterminate_hooks(k8s=k8s, name=name)
-        return not k8s.is_present(resource="clusterorder", name=name)
+        return k8s.get_cluster_order_phase(name=name, checked=False) is None
 
     poll_until(
         fn=_check_deleted, until=lambda v: v is True, retries=120, delay=10, description=f"{name} ClusterOrder deletion"
@@ -442,7 +507,9 @@ def _force_cleanup_machine_preterminate_hooks(*, k8s: K8sClient, name: str) -> N
 def wait_for_cluster_deleting(*, k8s: K8sClient, name: str) -> None:
     poll_until(
         fn=lambda: k8s.get_cluster_order_phase(name=name, checked=False),
-        until=lambda v: v == "Deleting",
+        # get_cluster_order_phase returns None only for a missing ClusterOrder;
+        # an empty phase from an existing object is not a deletion signal.
+        until=lambda v: v == "Deleting" or v is None,
         retries=30,
         delay=5,
         description=f"{name} ClusterOrder Deleting phase",

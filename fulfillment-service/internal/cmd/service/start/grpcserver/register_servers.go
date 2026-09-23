@@ -22,8 +22,6 @@ import (
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
@@ -31,6 +29,8 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/servers"
 	"github.com/osac-project/osac/fulfillment-service/internal/services"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 // ResourceServerDeps bundles the dependencies needed to construct every filterable resource's public/private
@@ -90,6 +90,19 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 		}
 		publicv1.RegisterClusterTemplatesServer(registrar, clusterTemplatesServer)
 
+		deps.Logger.InfoContext(ctx, "Creating add-on operators server")
+		addOnOperatorsServer, err := servers.NewAddOnOperatorsServer().
+			SetLogger(deps.Logger).
+			SetNotifier(deps.Notifier).
+			SetAttributionLogic(deps.PublicAttributionLogic).
+			SetTenancyLogic(deps.TenancyLogic).
+			SetMetricsRegisterer(deps.MetricsRegisterer).
+			Build()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create add-on operators server: %w", err)
+		}
+		publicv1.RegisterAddOnOperatorsServer(registrar, addOnOperatorsServer)
+
 		deps.Logger.InfoContext(ctx, "Creating cluster catalog items server")
 		clusterCatalogItemsServer, err := servers.NewClusterCatalogItemsServer().
 			SetLogger(deps.Logger).
@@ -132,6 +145,19 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 			return nil, fmt.Errorf("failed to create private cluster templates server: %w", err)
 		}
 		privatev1.RegisterClusterTemplatesServer(registrar, privateClusterTemplatesServer)
+
+		deps.Logger.InfoContext(ctx, "Creating private add-on operators server")
+		privateAddOnOperatorsServer, err := servers.NewPrivateAddOnOperatorsServer().
+			SetLogger(deps.Logger).
+			SetNotifier(deps.Notifier).
+			SetAttributionLogic(deps.PrivateAttributionLogic).
+			SetTenancyLogic(deps.TenancyLogic).
+			SetMetricsRegisterer(deps.MetricsRegisterer).
+			Build()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create private add-on operators server: %w", err)
+		}
+		privatev1.RegisterAddOnOperatorsServer(registrar, privateAddOnOperatorsServer)
 
 		deps.Logger.InfoContext(ctx, "Creating private cluster catalog items server")
 		privateClusterCatalogItemsServer, err := servers.NewPrivateClusterCatalogItemsServer().
@@ -198,6 +224,7 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 		SetAttributionLogic(deps.PublicAttributionLogic).
 		SetTenancyLogic(deps.TenancyLogic).
 		SetMetricsRegisterer(deps.MetricsRegisterer).
+		SetServiceFlags(deps.Services).
 		Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create host types server: %w", err)
@@ -212,13 +239,14 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 		SetAttributionLogic(deps.PrivateAttributionLogic).
 		SetTenancyLogic(deps.TenancyLogic).
 		SetMetricsRegisterer(deps.MetricsRegisterer).
+		SetServiceFlags(deps.Services).
 		Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create private host types server: %w", err)
 	}
 	privatev1.RegisterHostTypesServer(registrar, privateHostTypesServer)
 
-	// VMaaS: compute instance templates, compute instances, disk images
+	// VMaaS: compute instance templates and compute instances.
 	var privateComputeInstancesServer privatev1.ComputeInstancesServer
 	if deps.Services.VMaaS {
 		deps.Logger.InfoContext(ctx, "Creating compute instance templates server")
@@ -274,7 +302,10 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 			return nil, fmt.Errorf("failed to create private compute instances server: %w", err)
 		}
 		privatev1.RegisterComputeInstancesServer(registrar, privateComputeInstancesServer)
+	}
 
+	// Disk images are required by both VMaaS and BMaaS workflows.
+	if deps.Services.VMaaS || deps.Services.BMaaS {
 		deps.Logger.InfoContext(ctx, "Creating disk images server")
 		diskImagesServer, err := servers.NewDiskImagesServer().
 			SetLogger(deps.Logger).
@@ -522,6 +553,34 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 		return nil, fmt.Errorf("failed to create private network classes server: %w", err)
 	}
 	privatev1.RegisterNetworkClassesServer(registrar, privateNetworkClassesServer)
+
+	// Create the fabric domains server:
+	deps.Logger.InfoContext(ctx, "Creating fabric domains server")
+	fabricDomainsServer, err := servers.NewFabricDomainsServer().
+		SetLogger(deps.Logger).
+		SetNotifier(deps.Notifier).
+		SetAttributionLogic(deps.PublicAttributionLogic).
+		SetTenancyLogic(deps.TenancyLogic).
+		SetMetricsRegisterer(deps.MetricsRegisterer).
+		Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create fabric domains server: %w", err)
+	}
+	publicv1.RegisterFabricDomainsServer(registrar, fabricDomainsServer)
+
+	// Create the private fabric domains server:
+	deps.Logger.InfoContext(ctx, "Creating private fabric domains server")
+	privateFabricDomainsServer, err := servers.NewPrivateFabricDomainsServer().
+		SetLogger(deps.Logger).
+		SetNotifier(deps.Notifier).
+		SetAttributionLogic(deps.PrivateAttributionLogic).
+		SetTenancyLogic(deps.TenancyLogic).
+		SetMetricsRegisterer(deps.MetricsRegisterer).
+		Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create private fabric domains server: %w", err)
+	}
+	privatev1.RegisterFabricDomainsServer(registrar, privateFabricDomainsServer)
 
 	// VMaaS: instance types
 	if deps.Services.VMaaS {
@@ -989,22 +1048,35 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 	}
 	privatev1.RegisterProjectsServer(registrar, privateProjectsServer)
 
-	// VMaaS: volumes
-	if deps.Services.VMaaS {
-		deps.Logger.InfoContext(ctx, "Creating private volumes server")
-		privateVolumesServer, err := servers.NewPrivateVolumesServer().
-			SetLogger(deps.Logger).
-			SetNotifier(deps.Notifier).
-			SetAttributionLogic(deps.PrivateAttributionLogic).
-			SetTenancyLogic(deps.TenancyLogic).
-			SetMetricsRegisterer(deps.MetricsRegisterer).
-			SetTierResolver(deps.TierResolver).
-			Build()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create private volumes server: %w", err)
-		}
-		privatev1.RegisterVolumesServer(registrar, privateVolumesServer)
+	// Create the volumes server:
+	deps.Logger.InfoContext(ctx, "Creating volumes server")
+	volumesServer, err := servers.NewVolumesServer().
+		SetLogger(deps.Logger).
+		SetNotifier(deps.Notifier).
+		SetAttributionLogic(deps.PublicAttributionLogic).
+		SetTenancyLogic(deps.TenancyLogic).
+		SetMetricsRegisterer(deps.MetricsRegisterer).
+		SetTierResolver(deps.TierResolver).
+		Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create volumes server: %w", err)
 	}
+	publicv1.RegisterVolumesServer(registrar, volumesServer)
+
+	// Create the private volumes server:
+	deps.Logger.InfoContext(ctx, "Creating private volumes server")
+	privateVolumesServer, err := servers.NewPrivateVolumesServer().
+		SetLogger(deps.Logger).
+		SetNotifier(deps.Notifier).
+		SetAttributionLogic(deps.PrivateAttributionLogic).
+		SetTenancyLogic(deps.TenancyLogic).
+		SetMetricsRegisterer(deps.MetricsRegisterer).
+		SetTierResolver(deps.TierResolver).
+		Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create private volumes server: %w", err)
+	}
+	privatev1.RegisterVolumesServer(registrar, privateVolumesServer)
 
 	// Create the public users server:
 	deps.Logger.InfoContext(ctx, "Creating public users server")

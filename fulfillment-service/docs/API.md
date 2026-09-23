@@ -13,12 +13,13 @@ API. Do not use "resource" for this purpose.
 
 ## Public and private APIs
 
-The API has two variants:
+The proto contract lives in the **top-level `proto/` module**, not
+under `fulfillment-service/`. The API has two variants:
 
 - `proto/private/osac/private/v1/` contains the **private API** (editable source of truth), reserved for system administrators and controllers. This is the full API with all implementation details.
 - `proto/public/osac/public/v1/` contains the **public API** (generated, never edit manually), intended for regular users. This is automatically generated from the private API.
 
-**IMPORTANT**: Only edit files in `proto/private/`. The `proto/public/` directory is fully generated and will be overwritten.
+**IMPORTANT**: Only edit files in `proto/private/`. `proto/public/` and `proto/gen/` are fully generated and will be overwritten (`make -C proto generate`).
 
 ### How Public is Generated from Private
 
@@ -264,7 +265,7 @@ invalid requests with `InvalidArgument` errors that include field-level violatio
 
 - **Create requests**: Validated by protovalidate interceptor before reaching server handlers
 - **Update requests**: Server validates the merged object after applying `update_mask`
-  - Interceptor skips validation to avoid false errors on partial objects
+  - Protovalidate interceptor skips validation to avoid false errors on partial objects
   - Server merges request fields (per mask) with database object
   - Server validates the complete merged result with protovalidate
 
@@ -429,6 +430,14 @@ appear in the public API.
 
 In general, services should not have any additional ad-hoc methods beyond those listed above. There
 are some existing exceptions, and the project will work to remove them over time.
+
+### Events
+
+The `Events.Watch` stream delivers an `Event` for each generated object change. The `timestamp`
+field records when the event was generated. For `EVENT_TYPE_OBJECT_DELETED`, it is the authoritative
+deletion boundary: the object had no remaining finalizers when the event was generated. This is
+distinct from `Metadata.deletion_timestamp`, which records when deletion was requested. Clients
+must preserve the event timestamp when forwarding or storing events.
 
 ## Request and response messages
 
@@ -732,7 +741,7 @@ Repeated references (e.g., security groups in a network attachment) are arrays o
 
 ### Cross-project references
 
-To reference an object in a different project within the same tenant, set the `project` field:
+To reference an object by name in a different project within the same tenant, set the `project` field:
 
 ```json
 {
@@ -742,7 +751,7 @@ To reference an object in a different project within the same tenant, set the `p
 }
 ```
 
-To reference an object owned by the shared tenant (e.g., a globally available template), set
+To reference an object by name in the shared tenant (e.g., a globally available template), set
 `shared` to `true`:
 
 ```json
@@ -755,18 +764,21 @@ To reference an object owned by the shared tenant (e.g., a globally available te
 
 ### Server-side validation and resolution
 
-The server validates references automatically via a gRPC interceptor on `Create` and `Update`
-requests. For each reference field the interceptor:
+The server validates references on `Create` and `Update`. A gRPC interceptor handles most
+reference fields. For each field it handles, the interceptor:
 
-1. Determines the lookup scope (caller's tenant/project for local references; explicit
-   `project`/`shared` overrides for full references).
-2. Looks up the referenced object by `id`, `name`, or both.
+1. Determines the lookup scope from the object's tenant and project. For a full reference by
+   name, the `project` and `shared` fields can select another scope.
+2. Looks up the referenced object by `id` or `name`.
 3. If both `id` and `name` are provided, verifies they refer to the same object.
-4. Auto-populates whichever of `id` or `name` was not provided by the caller.
+4. Fills in whichever of `id` or `name` the caller omitted.
 
-Invalid references produce an `InvalidArgument` error with `google.rpc.BadRequest` details
-containing one `FieldViolation` per invalid reference. The `field` value is the dot-separated
-path to the reference field (e.g., `object.spec.template`, `object.spec.network_attachments[0].subnet`).
+Some references are validated by the object's handler after the complete object to be saved is
+known.
+
+For invalid references found by the interceptor, the server returns `InvalidArgument` with
+`google.rpc.BadRequest` details. Each `FieldViolation` names the reference field (e.g.,
+`object.spec.network_attachments[0].subnet`).
 
 ## Documentation
 

@@ -26,9 +26,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	hypershiftv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	"github.com/osac-project/osac/osac-operator/api/v1alpha1"
-	privatev1 "github.com/osac-project/osac/osac-operator/internal/api/osac/private/v1"
-	"github.com/osac-project/osac/osac-operator/pkg/provisioning"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,9 +35,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
 	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
+
+	"github.com/osac-project/osac/osac-operator/api/v1alpha1"
+	"github.com/osac-project/osac/osac-operator/pkg/provisioning"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
 // mockStorageBackendsClient is a test double for StorageBackendsClient.
@@ -752,7 +754,8 @@ var _ = Describe("Storage Controller", func() {
 					Expect(in.GetId()).To(Equal("secret-1"))
 					return privatev1.SecretsGetResponse_builder{
 						Object: privatev1.Secret_builder{
-							Data: map[string][]byte{"password": []byte(testSecretPassword)},
+							Type: privatev1.SecretType_SECRET_TYPE_VALUE,
+							Data: map[string][]byte{"value": []byte(testSecretPassword)},
 						}.Build(),
 					}.Build(), nil
 				},
@@ -769,7 +772,7 @@ var _ = Describe("Storage Controller", func() {
 			}))
 		})
 
-		It("should skip a backend whose password_secret is missing data[\"password\"], not provision an empty password", func() {
+		It("should skip a backend whose password_secret is missing data[\"value\"], not provision an empty password", func() {
 			tiersClient := &mockStorageTiersLister{
 				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
 					return privatev1.StorageTiersListResponse_builder{
@@ -785,7 +788,10 @@ var _ = Describe("Storage Controller", func() {
 			secretsClient := &mockSecretsClient{
 				getFunc: func(context.Context, *privatev1.SecretsGetRequest, ...grpc.CallOption) (*privatev1.SecretsGetResponse, error) {
 					return privatev1.SecretsGetResponse_builder{
-						Object: privatev1.Secret_builder{Data: map[string][]byte{}}.Build(),
+						Object: privatev1.Secret_builder{
+							Type: privatev1.SecretType_SECRET_TYPE_VALUE,
+							Data: map[string][]byte{},
+						}.Build(),
 					}.Build(), nil
 				},
 			}
@@ -2330,6 +2336,159 @@ var _ = Describe("Storage Controller", func() {
 			clusterCond := tenant.GetStatusCondition(v1alpha1.TenantConditionClusterStorageReady)
 			Expect(clusterCond).NotTo(BeNil())
 			Expect(clusterCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	Context("CaaS: cluster deletion without storage provider (OSAC-4340)", func() {
+		// These tests verify that CaaS cluster deletion (finalizer removal)
+		// works independently of:
+		//   1. ClusterStorageProvider being configured
+		//   2. Stage 1 (handleBackendReadiness) returning stop=true
+		//
+		// The watch engagement options (WithEngageWithLocalCluster/
+		// WithEngageWithProviderClusters) on the ClusterOrder Watches call
+		// are verified by source inspection — envtest runs against the
+		// local cluster only, so it cannot exercise multicluster watch
+		// delivery. The functional tests below verify the behavioral fix:
+		// once a reconcile is triggered, CaaS deletion runs regardless of
+		// provider or Stage 1 state.
+
+		It("should remove the cluster-storage finalizer from a deleting ClusterOrder when no ClusterStorageProvider is configured", func() {
+			tenantName := "caas-delete-no-provider"
+			createReadyTenantForStorage(ctx, tenantName, testNamespace)
+
+			// No backends, no providers: the environment has no storage infrastructure configured.
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval, provisioning.DefaultMaxJobHistory,
+			)
+
+			// Create a ClusterOrder with the cluster-storage finalizer already present
+			// (as if a previous reconcile with a provider had added it).
+			co := newClusterOrder("caas-del-no-prov-co", testNamespace, map[string]string{
+				osacTenantKey: tenantName,
+			})
+			controllerutil.AddFinalizer(co, clusterStorageFinalizer)
+			Expect(k8sClient.Create(ctx, co)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, co))).To(Succeed())
+			})
+
+			// Verify the finalizer is present
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(co), co)).To(Succeed())
+			Expect(co.Finalizers).To(ContainElement(clusterStorageFinalizer))
+
+			// Delete the ClusterOrder — the finalizer should block deletion
+			Expect(k8sClient.Delete(ctx, co)).To(Succeed())
+
+			// Reconcile the Tenant: handleCaaSDelete should process the
+			// deleting ClusterOrder even without a ClusterStorageProvider.
+			// The HCP does not exist (kubeconfig==nil), so cleanup is skipped
+			// and the finalizer is removed immediately.
+			nn := types.NamespacedName{Name: tenantName, Namespace: testNamespace}
+			Eventually(func(g Gomega) {
+				_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+				g.Expect(err).NotTo(HaveOccurred())
+
+				updatedCO := &v1alpha1.ClusterOrder{}
+				err = k8sClient.Get(ctx, client.ObjectKeyFromObject(co), updatedCO)
+				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
+				if err == nil {
+					g.Expect(updatedCO.Finalizers).NotTo(ContainElement(clusterStorageFinalizer),
+						"cluster-storage finalizer should be removed even without a ClusterStorageProvider")
+				}
+			}).Should(Succeed())
+		})
+
+		It("should remove the cluster-storage finalizer during Tenant deletion when no ClusterStorageProvider is configured", func() {
+			tenantName := "caas-tdel-no-provider"
+			createReadyTenantForStorage(ctx, tenantName, testNamespace)
+
+			// No backends, no providers.
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval, provisioning.DefaultMaxJobHistory,
+			)
+
+			// First reconcile: adds the storage finalizer to the Tenant
+			nn := types.NamespacedName{Name: tenantName, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Create a ClusterOrder with the cluster-storage finalizer
+			co := newClusterOrder("caas-tdel-co", testNamespace, map[string]string{
+				osacTenantKey: tenantName,
+			})
+			controllerutil.AddFinalizer(co, clusterStorageFinalizer)
+			Expect(k8sClient.Create(ctx, co)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, co))).To(Succeed())
+			})
+
+			// Delete the Tenant — handleDelete should clean up CaaS finalizers
+			tenant := &v1alpha1.Tenant{}
+			Expect(k8sClient.Get(ctx, nn, tenant)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, tenant)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+				g.Expect(err).NotTo(HaveOccurred())
+
+				// ClusterOrder's cluster-storage finalizer should be removed
+				updatedCO := &v1alpha1.ClusterOrder{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(co), updatedCO)).To(Succeed())
+				g.Expect(updatedCO.Finalizers).NotTo(ContainElement(clusterStorageFinalizer),
+					"cluster-storage finalizer should be removed from ClusterOrder during Tenant deletion")
+			}).Should(Succeed())
+		})
+
+		It("should remove the cluster-storage finalizer even when Stage 1 returns stop=true (backend registered, no AAP)", func() {
+			tenantName := "caas-del-stage1-stop"
+			createReadyTenantForStorage(ctx, tenantName, testNamespace)
+
+			// Backend registered but no AAP provider: Stage 1 (handleBackendReadiness)
+			// returns stop=true at the "backend registered but no AAP" branch.
+			// Before the OSAC-4340 fix, handleCaaSDelete was called AFTER Stage 1,
+			// so it was never reached. Now it runs before Stage 1.
+			r := NewStorageReconciler(
+				testMcManager, testNamespace, mcmanager.LocalCluster,
+				nil, nil, pollInterval, provisioning.DefaultMaxJobHistory,
+			)
+			r.BackendsClient = registeredBackendsClient(1)
+
+			// Create a ClusterOrder with the cluster-storage finalizer
+			co := newClusterOrder("caas-del-s1stop-co", testNamespace, map[string]string{
+				osacTenantKey: tenantName,
+			})
+			controllerutil.AddFinalizer(co, clusterStorageFinalizer)
+			Expect(k8sClient.Create(ctx, co)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, co))).To(Succeed())
+			})
+
+			// Verify the finalizer is present
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(co), co)).To(Succeed())
+			Expect(co.Finalizers).To(ContainElement(clusterStorageFinalizer))
+
+			// Delete the ClusterOrder
+			Expect(k8sClient.Delete(ctx, co)).To(Succeed())
+
+			// Reconcile: Stage 1 will return stop=true (backend registered,
+			// no AAP), but handleCaaSDelete runs before Stage 1 so the
+			// finalizer is removed regardless.
+			nn := types.NamespacedName{Name: tenantName, Namespace: testNamespace}
+			Eventually(func(g Gomega) {
+				_, err := r.Reconcile(ctx, storageReconcileRequest(nn))
+				g.Expect(err).NotTo(HaveOccurred())
+
+				updatedCO := &v1alpha1.ClusterOrder{}
+				err = k8sClient.Get(ctx, client.ObjectKeyFromObject(co), updatedCO)
+				g.Expect(client.IgnoreNotFound(err)).To(Succeed())
+				if err == nil {
+					g.Expect(updatedCO.Finalizers).NotTo(ContainElement(clusterStorageFinalizer),
+						"cluster-storage finalizer should be removed even when Stage 1 returns stop=true")
+				}
+			}).Should(Succeed())
 		})
 	})
 })

@@ -33,14 +33,15 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/cmd/cli/create/fieldutil"
 	"github.com/osac-project/osac/fulfillment-service/internal/cmd/cli/create/netutil"
+	"github.com/osac-project/osac/fulfillment-service/internal/cmd/cli/lookup"
 	"github.com/osac-project/osac/fulfillment-service/internal/config"
 	"github.com/osac-project/osac/fulfillment-service/internal/exit"
 	"github.com/osac-project/osac/fulfillment-service/internal/logging"
 	"github.com/osac-project/osac/fulfillment-service/internal/reflection"
 	"github.com/osac-project/osac/fulfillment-service/internal/terminal"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
 
 //go:embed templates
@@ -145,6 +146,12 @@ func Cmd() *cobra.Command {
 		"",
 		userDataFlagHelp,
 	)
+	flags.StringVar(
+		&runner.args.userDataSecret,
+		"user-data-secret",
+		"",
+		userDataSecretFlagHelp,
+	)
 	flags.StringArrayVar(
 		&runner.args.networkAttachments,
 		"network-attachment",
@@ -165,6 +172,7 @@ func Cmd() *cobra.Command {
 	)
 
 	result.MarkFlagsMutuallyExclusive("catalog-item", "template")
+	result.MarkFlagsMutuallyExclusive("user-data", "user-data-secret")
 	result.MarkFlagsOneRequired("catalog-item", "template")
 	return result
 }
@@ -185,6 +193,7 @@ type runnerContext struct {
 		additionalDisks         []string
 		runStrategy             string
 		userData                string
+		userDataSecret          string
 		networkAttachments      []string
 		externalIPAttachment    bool
 	}
@@ -192,6 +201,7 @@ type runnerContext struct {
 	console                *terminal.Console
 	settings               *config.Settings
 	templatesClient        publicv1.ComputeInstanceTemplatesClient
+	catalogItemsClient     publicv1.ComputeInstanceCatalogItemsClient
 	computeInstancesClient publicv1.ComputeInstancesClient
 }
 
@@ -257,11 +267,26 @@ func (c *runnerContext) run(cmd *cobra.Command, args []string) error {
 
 	// Create the gRPC clients:
 	c.templatesClient = publicv1.NewComputeInstanceTemplatesClient(conn)
+	c.catalogItemsClient = publicv1.NewComputeInstanceCatalogItemsClient(conn)
 	c.computeInstancesClient = publicv1.NewComputeInstancesClient(conn)
 
 	if c.args.catalogItem != "" {
-		// Catalog item path: skip template lookup entirely (per D-04).
-		specResult, specErr := c.buildSpecFromCatalogItem(c.args.catalogItem)
+		// Catalog item path: resolve an ID or visible name, then skip template lookup (per D-04).
+		catalogItem, err := lookup.Find(c.args.catalogItem, "compute instance catalog item",
+			func(filter string, limit int32) ([]*publicv1.ComputeInstanceCatalogItem, error) {
+				response, err := c.catalogItemsClient.List(ctx, publicv1.ComputeInstanceCatalogItemsListRequest_builder{
+					Filter: proto.String(filter),
+					Limit:  proto.Int32(limit),
+				}.Build())
+				if err != nil {
+					return nil, fmt.Errorf("failed to list catalog items: %w", err)
+				}
+				return response.GetItems(), nil
+			})
+		if err != nil {
+			return err
+		}
+		specResult, specErr := c.buildSpecFromCatalogItem(catalogItem.GetId())
 		if specErr != nil {
 			return specErr
 		}
@@ -734,7 +759,7 @@ func (c *runnerContext) buildSpec(templateID string,
 		spec.DiskImage = &publicv1.DiskImageReference{Name: c.args.diskImage}
 	}
 	if c.args.instanceType != "" {
-		spec.InstanceType = &publicv1.InstanceTypeReference{Name: c.args.instanceType}
+		spec.InstanceType = &publicv1.InstanceTypeReference{Id: c.args.instanceType}
 	}
 	if c.args.sshPublicKey != "" {
 		spec.SshPublicKey = proto.String(c.args.sshPublicKey)
@@ -763,6 +788,9 @@ func (c *runnerContext) buildSpec(templateID string,
 	if c.args.userData != "" {
 		spec.UserData = proto.String(c.args.userData)
 	}
+	if c.args.userDataSecret != "" {
+		spec.UserDataSecret = publicv1.SecretLocalReference_builder{Name: c.args.userDataSecret}.Build()
+	}
 	if err := c.applyNetworkingFlags(&spec); err != nil {
 		return nil, err
 	}
@@ -770,16 +798,17 @@ func (c *runnerContext) buildSpec(templateID string,
 }
 
 // buildBootDisk returns a boot disk from CLI flags, or nil if neither size nor storage tier was set.
-// A size-only boot disk is allowed because the server may resolve its tier from a catalog item or template.
+// Either field alone is allowed because the server may resolve the missing field from a catalog item or template.
 func (c *runnerContext) buildBootDisk() (*publicv1.ComputeInstanceDisk, error) {
 	if c.args.bootDiskSizeGiB <= 0 && c.args.bootDiskStorageTier == "" {
 		return nil, nil
 	}
-	if c.args.bootDiskSizeGiB <= 0 {
-		return nil, fmt.Errorf("--boot-disk-size is required when --boot-disk-storage-tier is set")
+	builder := publicv1.ComputeInstanceDisk_builder{}
+	if c.args.bootDiskSizeGiB < 0 {
+		return nil, fmt.Errorf("--boot-disk-size must be greater than zero")
 	}
-	builder := publicv1.ComputeInstanceDisk_builder{
-		SizeGib: proto.Int32(c.args.bootDiskSizeGiB),
+	if c.args.bootDiskSizeGiB > 0 {
+		builder.SizeGib = proto.Int32(c.args.bootDiskSizeGiB)
 	}
 	if c.args.bootDiskStorageTier != "" {
 		builder.StorageTier = publicv1.StorageTierReference_builder{
@@ -880,7 +909,7 @@ func (c *runnerContext) buildSpecFromCatalogItem(catalogItemID string) (*publicv
 		spec.DiskImage = &publicv1.DiskImageReference{Name: c.args.diskImage}
 	}
 	if c.args.instanceType != "" {
-		spec.InstanceType = &publicv1.InstanceTypeReference{Name: c.args.instanceType}
+		spec.InstanceType = &publicv1.InstanceTypeReference{Id: c.args.instanceType}
 	}
 	if c.args.sshPublicKey != "" {
 		spec.SshPublicKey = proto.String(c.args.sshPublicKey)
@@ -908,6 +937,9 @@ func (c *runnerContext) buildSpecFromCatalogItem(catalogItemID string) (*publicv
 	}
 	if c.args.userData != "" {
 		spec.UserData = proto.String(c.args.userData)
+	}
+	if c.args.userDataSecret != "" {
+		spec.UserDataSecret = publicv1.SecretLocalReference_builder{Name: c.args.userDataSecret}.Build()
 	}
 	if err := c.applyNetworkingFlags(&spec); err != nil {
 		return nil, err
@@ -1051,11 +1083,13 @@ _NAME_ - Name of the compute instance.
 
 const templateFlagHelp = `
 _TEMPLATE_ - Template identifier or name. Mutually exclusive with
-{{ bt }}--catalog-item{{ bt }}.
+{{ bt }}--catalog-item{{ bt }}. If a name matches more than one visible template,
+use its identifier.
 `
 
 const catalogItemFlagHelp = `
-_ID_ - Catalog item identifier. Mutually exclusive with
+_ID_OR_NAME_ - Catalog item identifier or name. If a name matches more than
+one visible item, use its identifier. Mutually exclusive with
 {{ bt }}--template{{ bt }}.
 `
 
@@ -1071,8 +1105,8 @@ times.
 `
 
 const instanceTypeFlagHelp = `
-_NAME_ - Instance type name. Specifies the compute resource
-configuration for this instance.
+_ID_OR_NAME_ - Instance type identifier or name. Specifies the compute resource
+configuration for this instance. Instance type identifiers are their names.
 `
 
 const diskImageFlagHelp = `
@@ -1107,6 +1141,13 @@ _STRATEGY_ - Run strategy, for example {{ bt }}Always{{ bt }} or
 const userDataFlagHelp = `
 _DATA_ - User data for the compute instance, for example cloud-init or
 ignition configuration.
+`
+
+const userDataSecretFlagHelp = `
+_NAME_ - Name of a Secret resource containing user data for the compute
+instance. The secret must exist in the same tenant. See also
+{{ bt }}osac create secret{{ bt }}. Mutually exclusive with
+{{ bt }}--user-data{{ bt }}.
 `
 
 const networkAttachmentFlagHelp = `

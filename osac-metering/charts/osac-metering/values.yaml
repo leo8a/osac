@@ -1,7 +1,12 @@
 image:
   repository: ghcr.io/osac-project/metering-service
-  tag: latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+  tag: latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
   pullPolicy: Always
+
+# Global values are supplied by the umbrella chart. The service validates the
+# identity at startup when this chart is installed standalone.
+global:
+  osacDeploymentId: ""
 
 # Fulfillment address is auto-derived from release namespace.
 # Override fulfillment.address for cross-namespace/cross-cluster (OSAC-3537).
@@ -52,7 +57,7 @@ m360Adapter:
   enabled: false
   image:
     repository: ghcr.io/osac-project/metering-m360-adapter
-    tag: latest  # PLACEHOLDER -- overwritten at release time by publish-charts.yaml
+    tag: latest  # PLACEHOLDER -- overwritten at release time by osac-build-and-publish.yaml
     pullPolicy: Always
   m360:
     apiUrl: ""

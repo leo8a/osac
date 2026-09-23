@@ -14,8 +14,8 @@ framework for provisioning and managing OpenShift clusters and virtual machines.
 installer repository contains the Kubernetes/OpenShift deployment configurations needed
 to deploy OSAC components on your infrastructure.
 
-For detailed architecture, workflows, and design documentation, please refer to the
-[OSAC documentation repository](https://github.com/osac-project/docs).
+For detailed architecture, workflows, and design documentation, please refer to
+[`docs/`](../docs/README.md) at the root of this repository.
 
 The OSAC platform provides:
 - **Self-service provisioning** for clusters and virtual machines through a governed API
@@ -193,15 +193,19 @@ so networking resources reconcile to READY without a real fabric (kind has none)
   - **Linux host** — rootful podman (invoked via `sudo`) or Docker
   - **Linux + Distrobox** — the rootful podman host socket (`/run/podman/podman.sock`);
     install the drop-in at `scripts/dev-full/manifests/podman-socket-rootful.conf`
-  - **macOS** — Docker Desktop (auto-detected)
+  - **macOS** — Docker Desktop or Podman Desktop. For Podman, start its machine and
+    verify `podman info` succeeds before installing.
 - **`/dev/kvm`** present (Linux), **`fs.inotify.max_user_instances >= 256`**, and
   `kind`, `helm`, `kubectl`, `jq`, `curl`, `openssl`, `python3` on `PATH`
-- Override runtime detection with `KIND_EXPERIMENTAL_PROVIDER=docker|podman`
+- Override runtime detection with `KIND_EXPERIMENTAL_PROVIDER=docker|podman`.
+  On Apple Silicon, an explicit `CONTAINER_TOOL=docker|podman` selects the same
+  runtime for installer operations when `KIND_EXPERIMENTAL_PROVIDER` is unset;
+  the latter takes precedence when both are provided.
 
-On an Apple Silicon Mac, the install target automatically builds an arm64
-replacement for `quay.io/openshift/origin-cli:4.20.0` with Docker and loads it
-into the kind cluster before installing Helm charts. Docker Desktop must be
-running; no manual image setup is required.
+On an Apple Silicon Mac, either Kind profile automatically builds an arm64
+replacement for `quay.io/openshift/origin-cli:4.20.0` with the selected
+container runtime and loads it into the kind cluster before installing Helm
+charts. No manual image setup is required.
 
 **Endpoints** (via the kind port mappings; every `*.localhost` name resolves to
 127.0.0.1 automatically, so no `/etc/hosts` editing is needed):
